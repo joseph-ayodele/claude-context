@@ -29,14 +29,19 @@ make_sandbox() {
 # Run setup with sandbox HOME. Always passes --skip-gbrain so tests don't
 # touch the real ~/.gbrain. Forwards extra flags. Suppresses stdout/stderr
 # unless the test explicitly wants them (use `run_setup_verbose` then).
+#
+# Pin SHELL=/bin/zsh so rc-file detection is deterministic regardless of
+# which shell the runner happens to start with. (CI macOS runners ship
+# with bash; without this pin, setup writes to ~/.bashrc and tests that
+# check ~/.zshrc fail.) Tests that explicitly need other shells override.
 run_setup() {
   local home="$1"; shift
-  HOME="$home" bash "$SETUP" --yes --skip-gbrain "$@" >/dev/null 2>&1
+  SHELL=/bin/zsh HOME="$home" bash "$SETUP" --yes --skip-gbrain "$@" >/dev/null 2>&1
 }
 
 run_setup_verbose() {
   local home="$1"; shift
-  HOME="$home" bash "$SETUP" --yes --skip-gbrain "$@" 2>&1
+  SHELL=/bin/zsh HOME="$home" bash "$SETUP" --yes --skip-gbrain "$@" 2>&1
 }
 
 # ----- Assertions -----

@@ -40,15 +40,10 @@ assert_contains "hook references project sidecar path"    "ai-context/CLAUDE.md.
 assert_contains "hook references global sidecar path"     ".claude/CLAUDE.md.ai-context-proposed" "$ctx"
 assert_contains "hook tells Claude to read both files"    "Read both" "$ctx"
 
-# Re-running setup with identical sidecar content is a no-op (cmp -s match)
-# Setup should NOT create a duplicate sidecar.
-sidecar_before=$(stat -f %m "$SANDBOX/ai-context/CLAUDE.md.ai-context-proposed" 2>/dev/null \
-  || stat -c %Y "$SANDBOX/ai-context/CLAUDE.md.ai-context-proposed")
+# Re-running setup is safe: the user's existing files stay untouched.
+# (We don't compare sidecar mtimes — setup may legitimately re-write the
+# sidecar if the proposed content drifts between runs.)
 run_setup "$SANDBOX"
-sidecar_after=$(stat -f %m "$SANDBOX/ai-context/CLAUDE.md.ai-context-proposed" 2>/dev/null \
-  || stat -c %Y "$SANDBOX/ai-context/CLAUDE.md.ai-context-proposed")
-# Note: sidecar may get re-written if proposed content drifts; we only assert
-# the existing user file is still untouched.
 assert_eq "project CLAUDE.md still preserved on re-run" "$custom_proj" "$(cat "$SANDBOX/ai-context/CLAUDE.md")"
 
 finish

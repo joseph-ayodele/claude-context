@@ -10,7 +10,10 @@ SANDBOX="$(make_sandbox)"
 run_setup "$SANDBOX"
 
 # Confirm install state
-[[ -d "$SANDBOX/.claude/hooks" ]] && hook_count=$(ls "$SANDBOX/.claude/hooks" | wc -l | tr -d ' ') || hook_count=0
+hook_count=0
+if [[ -d "$SANDBOX/.claude/hooks" ]]; then
+  hook_count=$(find "$SANDBOX/.claude/hooks" -maxdepth 1 -type f -name 'ai-context-*.sh' | wc -l | tr -d ' ')
+fi
 assert_eq "4 hooks installed" "4" "$hook_count"
 
 # Run uninstall (--yes accepts confirms for deleting context dir + global CLAUDE.md)
