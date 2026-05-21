@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck setup.sh tests/lib.sh tests/run-all.sh tests/test-*.sh
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: ensure jq is present
+        run: command -v jq || sudo apt-get install -y jq
+        if: runner.os == 'Linux'
+      - name: run tests
+        run: bash tests/run-all.sh

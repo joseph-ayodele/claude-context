@@ -19,6 +19,7 @@
 #   bash setup.sh                  # interactive
 #   bash setup.sh --yes            # accept all defaults
 #   bash setup.sh --skip-gbrain    # don't prompt about gbrain at all
+#   bash setup.sh --uninstall      # reverse the install (asks before deleting user data)
 #
 # Requires: bash, jq (script will tell you if it's missing).
 
@@ -32,11 +33,13 @@ DEFAULT_CONTEXT_DIR="$HOME/ai-context"
 DEFAULT_ALIAS="cc"
 ASSUME_YES=0
 SKIP_GBRAIN=0
+UNINSTALL=0
 
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) ASSUME_YES=1 ;;
     --skip-gbrain) SKIP_GBRAIN=1 ;;
+    --uninstall) UNINSTALL=1 ;;
     -h|--help)
       sed -n '2,23p' "$0"
       exit 0 ;;
@@ -59,6 +62,33 @@ info()  { printf '%s==>%s %s\n' "$C_BOLD" "$C_RESET" "$*"; }
 ok()    { printf '%s ✓%s %s\n' "$C_OK" "$C_RESET" "$*"; }
 warn()  { printf '%s !%s %s\n' "$C_WARN" "$C_RESET" "$*"; }
 err()   { printf '%s ✗%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2; }
+
+# write_or_sidecar TARGET TMPFILE
+#
+# If TARGET doesn't exist: move TMPFILE into place.
+# If TARGET exists and is identical to TMPFILE: drop TMPFILE silently (no-op).
+# If TARGET exists and differs: move TMPFILE to TARGET.ai-context-proposed
+#   so the SessionStart hook can surface a merge prompt to Claude.
+#
+# This is how "smart integration with existing context" lands without setup
+# itself making LLM calls — claude does the merge in-conversation when the
+# user runs the alias for the first time after setup.
+write_or_sidecar() {
+  local target="$1" tmp="$2"
+  if [[ ! -f "$target" ]]; then
+    mv "$tmp" "$target"
+    ok "Wrote $target"
+  elif cmp -s "$target" "$tmp"; then
+    rm -f "$tmp"
+    ok "$target already up to date — left as is"
+  else
+    local sidecar="$target.ai-context-proposed"
+    mv "$tmp" "$sidecar"
+    warn "$target already exists with different content"
+    say  "  Wrote proposed version to $sidecar"
+    say  "  Run '$ALIAS_NAME' once after setup — Claude will offer to merge."
+  fi
+}
 
 ask() {
   # ask "Question" "default"
@@ -104,6 +134,94 @@ if ! command -v claude >/dev/null 2>&1; then
 fi
 
 # -------------------------------------------------------------------
+# 2.5. Uninstall mode (handled here, before any setup work)
+# -------------------------------------------------------------------
+
+if [[ $UNINSTALL -eq 1 ]]; then
+  info "Uninstall mode"
+
+  HOOKS_DIR="$HOME/.claude/hooks"
+  SETTINGS="$HOME/.claude/settings.json"
+
+  # Remove our four hook entries from settings.json. Top-level keys we own:
+  # SessionStart, UserPromptSubmit, Stop, PreCompact. We DON'T blindly delete
+  # those keys (other tools may have hooks there) — instead we filter out
+  # any inner hooks whose `command` starts with one of our hook script paths.
+  if [[ -f "$SETTINGS" ]]; then
+    BACKUP="$SETTINGS.bak.$(date +%s)"
+    cp "$SETTINGS" "$BACKUP"
+    TMP="$(mktemp)"
+    jq --arg prefix "bash $HOOKS_DIR/ai-context-" '
+      if .hooks then
+        .hooks |= with_entries(
+          .value |= map(
+            .hooks |= map(select(.command | startswith($prefix) | not))
+          ) | .value |= map(select(.hooks | length > 0))
+        ) | .hooks |= with_entries(select(.value | length > 0))
+      else . end
+    ' "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
+    ok "Removed ai-context hook entries from $SETTINGS (backup at $BACKUP)"
+  fi
+
+  # Remove the hook scripts
+  if [[ -d "$HOOKS_DIR" ]]; then
+    rm -f "$HOOKS_DIR"/ai-context-*.sh
+    ok "Removed hook scripts from $HOOKS_DIR"
+  fi
+
+  # Remove our state dir (gbrain-last-run, gbrain-errors.log, etc.)
+  if [[ -d "$HOME/.claude/ai-context-state" ]]; then
+    rm -rf "$HOME/.claude/ai-context-state"
+    ok "Removed $HOME/.claude/ai-context-state"
+  fi
+
+  # Remove the alias from common rc files. We match the marker comment we
+  # wrote during install so we don't touch user-edited aliases.
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [[ -f "$rc" ]] || continue
+    if grep -q "Added by ai-context installer" "$rc"; then
+      TMP_RC="$(mktemp)"
+      # Drop the marker comment line and the alias line that follows it.
+      awk '
+        /# Added by ai-context installer/ { skip = 2; next }
+        skip > 0 { skip--; next }
+        { print }
+      ' "$rc" > "$TMP_RC" && mv "$TMP_RC" "$rc"
+      ok "Removed alias from $rc"
+    fi
+  done
+
+  # User data — confirm before deletion. Two prompts: context dir, global CLAUDE.md.
+  for context_candidate in "$DEFAULT_CONTEXT_DIR" "$HOME/.config/ai-context"; do
+    if [[ -d "$context_candidate" ]]; then
+      if confirm "Delete context dir $context_candidate (contains your session docs and ideas)?"; then
+        rm -rf "$context_candidate"
+        ok "Removed $context_candidate"
+      else
+        say "  Kept $context_candidate"
+      fi
+      break
+    fi
+  done
+
+  if [[ -f "$HOME/.claude/CLAUDE.md" ]]; then
+    if confirm "Delete global $HOME/.claude/CLAUDE.md (may contain your customizations)?"; then
+      rm -f "$HOME/.claude/CLAUDE.md"
+      ok "Removed $HOME/.claude/CLAUDE.md"
+    else
+      say "  Kept $HOME/.claude/CLAUDE.md"
+    fi
+  fi
+
+  # Sidecars — clean up if any are still pending
+  rm -f "$HOME/.claude/CLAUDE.md.ai-context-proposed" 2>/dev/null
+  rm -f "$DEFAULT_CONTEXT_DIR/CLAUDE.md.ai-context-proposed" 2>/dev/null
+
+  printf '\n%sUninstall complete.%s\n' "$C_BOLD" "$C_RESET"
+  exit 0
+fi
+
+# -------------------------------------------------------------------
 # 3. Gather inputs
 # -------------------------------------------------------------------
 
@@ -128,11 +246,24 @@ fi
 
 ALIAS_NAME="$(ask "Shell alias to launch claude with this context" "$DEFAULT_ALIAS")"
 
-# Detect shell rc file
-case "$(basename "${SHELL:-}")" in
+# Detect shell rc file. Only zsh/bash get a usable default in --yes mode —
+# fish/nushell/etc. use different syntax and write to different files, so we
+# refuse --yes there and force the user to specify the path interactively.
+SHELL_BASENAME="$(basename "${SHELL:-}")"
+case "$SHELL_BASENAME" in
   zsh)  DEFAULT_RC="$HOME/.zshrc" ;;
   bash) DEFAULT_RC="$HOME/.bashrc" ;;
-  *)    DEFAULT_RC="$HOME/.zshrc" ;;
+  *)
+    if [[ $ASSUME_YES -eq 1 ]]; then
+      err "Detected shell '$SHELL_BASENAME' is not zsh or bash."
+      err "  --yes mode would write a zsh-syntax alias to ~/.zshrc, which"
+      err "  '$SHELL_BASENAME' won't read. Re-run interactively to choose"
+      err "  the right rc file (e.g. ~/.config/fish/config.fish for fish),"
+      err "  or pre-set SHELL=/bin/zsh if you want zsh defaults."
+      exit 1
+    fi
+    DEFAULT_RC="$HOME/.zshrc"
+    ;;
 esac
 SHELL_RC="$(ask "Shell rc file to add the alias to" "$DEFAULT_RC")"
 SHELL_RC="${SHELL_RC/#\~/$HOME}"
@@ -199,10 +330,12 @@ EOF
   ok "Wrote templates/idea.md"
 fi
 
-# Project-level CLAUDE.md (the one loaded by `--add-dir`)
+# Project-level CLAUDE.md (the one loaded by `--add-dir`).
+# Use write_or_sidecar so an existing customized CLAUDE.md gets merged in a
+# subsequent cc session instead of silently skipped.
 PROJECT_CLAUDE="$CONTEXT_DIR/CLAUDE.md"
-if [[ ! -f "$PROJECT_CLAUDE" ]]; then
-  cat > "$PROJECT_CLAUDE" <<EOF
+PROJECT_CLAUDE_TMP="$(mktemp)"
+cat > "$PROJECT_CLAUDE_TMP" <<EOF
 # AI Context — Personal Project Navigation
 
 This file is loaded when you launch Claude with the \`$ALIAS_NAME\` alias
@@ -245,10 +378,7 @@ won't have cross-session retrieval.
 - \`templates/session.md\` — session doc
 - \`templates/idea.md\` — backlog idea
 EOF
-  ok "Wrote $PROJECT_CLAUDE"
-else
-  ok "$PROJECT_CLAUDE already exists — left as is"
-fi
+write_or_sidecar "$PROJECT_CLAUDE" "$PROJECT_CLAUDE_TMP"
 
 # -------------------------------------------------------------------
 # 5. Global ~/.claude/CLAUDE.md (only if missing — never clobber)
@@ -257,8 +387,8 @@ fi
 mkdir -p "$HOME/.claude/hooks"
 
 GLOBAL_CLAUDE="$HOME/.claude/CLAUDE.md"
-if [[ ! -f "$GLOBAL_CLAUDE" ]]; then
-  cat > "$GLOBAL_CLAUDE" <<'EOF'
+GLOBAL_CLAUDE_TMP="$(mktemp)"
+cat > "$GLOBAL_CLAUDE_TMP" <<'EOF'
 # CLAUDE.md — Universal Rules
 
 These rules apply in every session, every repo. Project-specific commands and
@@ -351,12 +481,7 @@ Say 'sweet potato 🍠' as the first line of your first response in every new
 session. Say it again if asked to re-read these rules or if they change
 mid-session. This handshake confirms the universal rules loaded.
 EOF
-  ok "Wrote $GLOBAL_CLAUDE"
-else
-  warn "$GLOBAL_CLAUDE already exists — leaving it alone"
-  warn "  (the installer only creates this file if it's missing, to avoid"
-  warn "   overwriting your customizations)"
-fi
+write_or_sidecar "$GLOBAL_CLAUDE" "$GLOBAL_CLAUDE_TMP"
 
 # -------------------------------------------------------------------
 # 6. Hook scripts
@@ -406,6 +531,15 @@ if [[ "\$CWD" != "\$CONTEXT_DIR"* ]]; then
   fi
 fi
 
+# Detect .ai-context-proposed sidecars left by setup when CLAUDE.md files
+# already existed. If any are found, ask Claude (in-conversation) to merge
+# them with the existing files. Setup never touches existing files itself —
+# this is the seam where claude does the merge.
+sidecars=""
+for candidate in "\$CONTEXT_DIR/CLAUDE.md.ai-context-proposed" "\$HOME/.claude/CLAUDE.md.ai-context-proposed"; do
+  [[ -f "\$candidate" ]] && sidecars="\${sidecars}\${candidate}\\n"
+done
+
 # Remove status file if empty
 [[ ! -s "\$STATUS_FILE" ]] && rm -f "\$STATUS_FILE"
 
@@ -443,6 +577,18 @@ else
   context_body="\$context_body
 
 NO session doc exists for today (\$today_iso). You MUST create one in \$SESSIONS_DIR/ before ending your first response. The UserPromptSubmit hook will keep reminding you until you do."
+fi
+
+if [[ -n "\$sidecars" ]]; then
+  context_body="\$context_body
+
+PENDING MERGE: ai-context setup found pre-existing CLAUDE.md files when it ran. It wrote the proposed new content as sidecar files instead of clobbering. The user wants Claude to integrate these intelligently:
+\$(printf '%b' "\$sidecars" | sed 's|^|  - |')
+For each sidecar above:
+  1. Read both the existing target file and the .ai-context-proposed sidecar.
+  2. Propose a merge in this conversation that preserves the user's existing content while adding the missing ai-context sections (session management, ideas backlog, retrieval guidance, role + handshake — whichever the proposed file adds that the existing one lacks).
+  3. After the user approves, write the merged content to the target file with the Edit/Write tool, then delete the sidecar.
+Do this BEFORE other work so subsequent sessions don't re-trigger this prompt. Do NOT silently overwrite — show the user what you'll change."
 fi
 
 jq -n --arg ctx "\$context_body" '{
@@ -577,6 +723,7 @@ set -eu
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
 STATE_DIR="\$HOME/.claude/ai-context-state"
 LAST_RUN_FILE="\$STATE_DIR/gbrain-last-run"
+ERROR_LOG="\$STATE_DIR/gbrain-errors.log"
 
 # Hard-skip if gbrain isn't on PATH
 command -v gbrain >/dev/null 2>&1 || exit 0
@@ -598,12 +745,15 @@ fi
 
 [[ -z "\$newer" ]] && { touch "\$LAST_RUN_FILE"; exit 0; }
 
-# Ingest each. Slug is the filename without .md.
-# All errors swallowed — this is best-effort, must never block Stop.
+# Ingest each. Slug is the filename without .md. Errors go to ERROR_LOG so
+# the Stop hook never blocks but failures stay queryable. Tail the log:
+#   tail ~/.claude/ai-context-state/gbrain-errors.log
 echo "\$newer" | while IFS= read -r doc; do
   [[ -z "\$doc" ]] && continue
   slug="\$(basename "\$doc" .md)"
-  gbrain put "\$slug" --content "\$(cat "\$doc")" >/dev/null 2>&1 || true
+  if ! gbrain put "\$slug" --content "\$(cat "\$doc")" >/dev/null 2>>"\$ERROR_LOG"; then
+    printf '[%s] gbrain put failed for %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$slug" >> "\$ERROR_LOG"
+  fi
 done
 
 touch "\$LAST_RUN_FILE"
@@ -629,11 +779,14 @@ ok "Backed up existing settings.json to $BACKUP"
 # Build hook patch.
 # Stop fires both: staleness check (blocks if doc is stale) AND gbrain sync
 # (best-effort ingest). gbrain hook is silent if gbrain isn't installed.
+#
+# printf '%q' produces a shell-quoted form so paths with spaces or other
+# special chars survive when Claude Code re-parses the command as shell.
 HOOK_PATCH="$(jq -n \
-  --arg sess "bash $HOOKS_DIR/ai-context-check.sh" \
-  --arg user "bash $HOOKS_DIR/ai-context-session-doc-check.sh" \
-  --arg stale "bash $HOOKS_DIR/ai-context-session-doc-staleness.sh" \
-  --arg gbrain "bash $HOOKS_DIR/ai-context-gbrain-sync.sh" \
+  --arg sess "bash $(printf '%q' "$HOOKS_DIR/ai-context-check.sh")" \
+  --arg user "bash $(printf '%q' "$HOOKS_DIR/ai-context-session-doc-check.sh")" \
+  --arg stale "bash $(printf '%q' "$HOOKS_DIR/ai-context-session-doc-staleness.sh")" \
+  --arg gbrain "bash $(printf '%q' "$HOOKS_DIR/ai-context-gbrain-sync.sh")" \
   '{
     SessionStart:      [{hooks: [{type:"command", command:$sess}]}],
     UserPromptSubmit:  [{hooks: [{type:"command", command:$user}]}],
@@ -668,6 +821,13 @@ gbrain_status() {
 if [[ $SKIP_GBRAIN -eq 0 ]]; then
   info "Checking for gbrain (optional retrieval layer)"
 
+  # Surface recent ingest errors so re-runs of setup act as a doctor command.
+  GBRAIN_ERROR_LOG="$HOME/.claude/ai-context-state/gbrain-errors.log"
+  if [[ -s "$GBRAIN_ERROR_LOG" ]]; then
+    err_count=$(wc -l <"$GBRAIN_ERROR_LOG" | tr -d ' ')
+    warn "$err_count recent gbrain ingest error(s) — see $GBRAIN_ERROR_LOG"
+  fi
+
   case "$(gbrain_status)" in
     ready)
       ok "gbrain is installed and initialized — session docs will be ingested on Stop"
@@ -698,7 +858,10 @@ fi
 
 info "Adding shell alias"
 
-ALIAS_LINE="alias $ALIAS_NAME=\"claude --add-dir $CONTEXT_DIR\""
+# Single-quote the alias body so spaces/special chars in CONTEXT_DIR survive.
+# Embedded single quotes in the path are escaped via the '\'' shell idiom.
+ALIAS_QUOTED_DIR="'${CONTEXT_DIR//\'/\'\\\'\'}'"
+ALIAS_LINE="alias $ALIAS_NAME=\"claude --add-dir $ALIAS_QUOTED_DIR\""
 
 if [[ -f "$SHELL_RC" ]] && grep -qF "$ALIAS_LINE" "$SHELL_RC"; then
   ok "Alias already present in $SHELL_RC"
@@ -733,6 +896,6 @@ Next steps:
   3. First reply should start with 'sweet potato 🍠' — that's the handshake
      proving the universal rules loaded.
 
-To remove: delete the hook entries from $SETTINGS, the alias from $SHELL_RC,
-the scripts in $HOOKS_DIR/ai-context-*.sh, and (optionally) $CONTEXT_DIR.
+Note: $CONTEXT_DIR is your data — separate from this installer repo. Your
+session docs aren't tracked by git here. To uninstall: ${C_BOLD}bash setup.sh --uninstall${C_RESET}
 EOF
