@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# install.sh — portable installer for the "cc" Claude Code setup.
+# setup.sh — portable setup for the "cc" Claude Code workflow.
 #
 # Replicates this setup on a new machine for a personal project:
-#   - A context directory with templates/, sessions/, and CLAUDE.md
-#   - Four hook scripts in ~/.claude/hooks/
+#   - A context directory with templates/, sessions/, ideas/, and CLAUDE.md
+#   - Four hook scripts in ~/.claude/hooks/ (SessionStart checklist,
+#     UserPromptSubmit session-doc gate, Stop+PreCompact staleness check,
+#     Stop gbrain ingest bridge)
 #   - Hook entries merged into ~/.claude/settings.json
 #   - A shell alias (default: `cc`) that runs `claude --add-dir <context-dir>`
 #   - Global ~/.claude/CLAUDE.md with role + handshake (only if missing)
+#   - Optional gbrain integration: if gbrain CLI is installed and initialized,
+#     session docs flow into it as pages (best-effort; gracefully skipped if
+#     gbrain is missing).
 #
 # Idempotent — safe to re-run. Won't overwrite anything without prompting.
 #
 # Usage:
-#   bash install.sh                # interactive
-#   bash install.sh --yes          # accept all defaults
+#   bash setup.sh                  # interactive
+#   bash setup.sh --yes            # accept all defaults
+#   bash setup.sh --skip-gbrain    # don't prompt about gbrain at all
 #
 # Requires: bash, jq (script will tell you if it's missing).
 
@@ -25,12 +31,14 @@ set -euo pipefail
 DEFAULT_CONTEXT_DIR="$HOME/ai-context"
 DEFAULT_ALIAS="cc"
 ASSUME_YES=0
+SKIP_GBRAIN=0
 
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) ASSUME_YES=1 ;;
+    --skip-gbrain) SKIP_GBRAIN=1 ;;
     -h|--help)
-      sed -n '2,18p' "$0"
+      sed -n '2,23p' "$0"
       exit 0 ;;
   esac
 done
@@ -219,6 +227,18 @@ it here rather than letting it die in chat.
 When kicking off a new project or feature, the \`/office-hours\` skill is a
 great starting point — it walks through the design questions before code is
 written and saves a design doc.
+
+## Retrieval (optional)
+
+If \`gbrain\` is installed and initialized, every session doc you save is
+automatically ingested as a page on Stop. Search across all your sessions:
+
+  \`\`\`
+  gbrain search "<phrase>"
+  \`\`\`
+
+If gbrain isn't installed, the rest of this setup works fine — you just
+won't have cross-session retrieval.
 
 ## Templates
 
@@ -542,6 +562,56 @@ EOF
 chmod +x "$HOOKS_DIR/ai-context-session-doc-staleness.sh"
 ok "Wrote $HOOKS_DIR/ai-context-session-doc-staleness.sh"
 
+# 6d. Stop: best-effort gbrain ingest of session docs.
+#     Self-detecting: silently skips if gbrain is missing or unhealthy.
+#     Tracks ingested files via a state dir to only push changed/new docs.
+cat > "$HOOKS_DIR/ai-context-gbrain-sync.sh" <<EOF
+#!/usr/bin/env bash
+# ai-context-gbrain-sync.sh
+# Stop hook. Best-effort: if gbrain is installed and initialized, push any
+# session docs that have changed since last run into gbrain as pages. If
+# gbrain is missing, exits silently. Never blocks.
+
+set -eu
+
+SESSIONS_DIR="$CONTEXT_DIR/sessions"
+STATE_DIR="\$HOME/.claude/ai-context-state"
+LAST_RUN_FILE="\$STATE_DIR/gbrain-last-run"
+
+# Hard-skip if gbrain isn't on PATH
+command -v gbrain >/dev/null 2>&1 || exit 0
+
+# Hard-skip if gbrain isn't initialized (config file is the cheapest probe)
+[[ -f "\$HOME/.gbrain/config.json" ]] || exit 0
+
+# Hard-skip if no sessions to sync
+[[ -d "\$SESSIONS_DIR" ]] || exit 0
+
+mkdir -p "\$STATE_DIR"
+
+# Find session docs newer than last run (or all of them on first run)
+if [[ -f "\$LAST_RUN_FILE" ]]; then
+  newer=\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name '*.md' -newer "\$LAST_RUN_FILE" 2>/dev/null)
+else
+  newer=\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+fi
+
+[[ -z "\$newer" ]] && { touch "\$LAST_RUN_FILE"; exit 0; }
+
+# Ingest each. Slug is the filename without .md.
+# All errors swallowed — this is best-effort, must never block Stop.
+echo "\$newer" | while IFS= read -r doc; do
+  [[ -z "\$doc" ]] && continue
+  slug="\$(basename "\$doc" .md)"
+  gbrain put "\$slug" --content "\$(cat "\$doc")" >/dev/null 2>&1 || true
+done
+
+touch "\$LAST_RUN_FILE"
+exit 0
+EOF
+chmod +x "$HOOKS_DIR/ai-context-gbrain-sync.sh"
+ok "Wrote $HOOKS_DIR/ai-context-gbrain-sync.sh"
+
 # -------------------------------------------------------------------
 # 7. Merge hook entries into ~/.claude/settings.json
 # -------------------------------------------------------------------
@@ -556,15 +626,18 @@ BACKUP="$SETTINGS.bak.$(date +%s)"
 cp "$SETTINGS" "$BACKUP"
 ok "Backed up existing settings.json to $BACKUP"
 
-# Build hook patch
+# Build hook patch.
+# Stop fires both: staleness check (blocks if doc is stale) AND gbrain sync
+# (best-effort ingest). gbrain hook is silent if gbrain isn't installed.
 HOOK_PATCH="$(jq -n \
   --arg sess "bash $HOOKS_DIR/ai-context-check.sh" \
   --arg user "bash $HOOKS_DIR/ai-context-session-doc-check.sh" \
   --arg stale "bash $HOOKS_DIR/ai-context-session-doc-staleness.sh" \
+  --arg gbrain "bash $HOOKS_DIR/ai-context-gbrain-sync.sh" \
   '{
     SessionStart:      [{hooks: [{type:"command", command:$sess}]}],
     UserPromptSubmit:  [{hooks: [{type:"command", command:$user}]}],
-    Stop:              [{hooks: [{type:"command", command:$stale}]}],
+    Stop:              [{hooks: [{type:"command", command:$stale}, {type:"command", command:$gbrain}]}],
     PreCompact:        [{hooks: [{type:"command", command:$stale}]}]
   }')"
 
@@ -574,6 +647,50 @@ TMP="$(mktemp)"
 jq --argjson patch "$HOOK_PATCH" '. + {hooks: ((.hooks // {}) + $patch)}' "$SETTINGS" > "$TMP"
 mv "$TMP" "$SETTINGS"
 ok "Hook entries merged into $SETTINGS"
+
+# -------------------------------------------------------------------
+# 7.5. Detect gbrain — offer to install/init if missing
+# -------------------------------------------------------------------
+# The gbrain bridge hook above is best-effort and self-detecting, so this
+# step is purely advisory: tell the user whether retrieval will work, and
+# offer to bridge the gap if it won't.
+
+gbrain_status() {
+  if ! command -v gbrain >/dev/null 2>&1; then
+    echo "missing"
+  elif [[ ! -f "$HOME/.gbrain/config.json" ]]; then
+    echo "not-initialized"
+  else
+    echo "ready"
+  fi
+}
+
+if [[ $SKIP_GBRAIN -eq 0 ]]; then
+  info "Checking for gbrain (optional retrieval layer)"
+
+  case "$(gbrain_status)" in
+    ready)
+      ok "gbrain is installed and initialized — session docs will be ingested on Stop"
+      ;;
+    missing)
+      warn "gbrain CLI not on PATH"
+      say  "  gbrain is an optional persistent knowledge base by Garry Tan."
+      say  "  When installed, every session doc you write gets indexed and"
+      say  "  becomes searchable across all your projects."
+      say  ""
+      say  "  Install it later with:"
+      say  "    ${C_BOLD}curl -fsSL https://gbrain.dev/install.sh | bash${C_RESET}"
+      say  "    ${C_BOLD}gbrain init --pglite${C_RESET}"
+      say  ""
+      say  "  Or skip — the rest of this setup works fine without it."
+      ;;
+    not-initialized)
+      warn "gbrain is installed but not initialized (no ~/.gbrain/config.json)"
+      say  "  Initialize with: ${C_BOLD}gbrain init --pglite${C_RESET}"
+      say  "  Until then, the gbrain hook will silently skip on Stop."
+      ;;
+  esac
+fi
 
 # -------------------------------------------------------------------
 # 8. Add the alias
@@ -600,14 +717,15 @@ fi
 
 cat <<EOF
 
-${C_BOLD}Install complete.${C_RESET}
+${C_BOLD}Setup complete.${C_RESET}
 
 What was set up:
   ${C_DIM}context dir:${C_RESET}   $CONTEXT_DIR
   ${C_DIM}global rules:${C_RESET}  $GLOBAL_CLAUDE
-  ${C_DIM}hooks:${C_RESET}         $HOOKS_DIR/ai-context-*.sh
+  ${C_DIM}hooks:${C_RESET}         $HOOKS_DIR/ai-context-*.sh (4 hooks)
   ${C_DIM}settings:${C_RESET}      $SETTINGS (backup at $BACKUP)
   ${C_DIM}alias:${C_RESET}         '$ALIAS_NAME' in $SHELL_RC
+  ${C_DIM}gbrain:${C_RESET}        $(gbrain_status)
 
 Next steps:
   1. Reload your shell:  ${C_BOLD}source $SHELL_RC${C_RESET}
