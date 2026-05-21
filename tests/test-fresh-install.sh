@@ -6,6 +6,7 @@
 #   - alias added to ~/.zshrc
 #   - global ~/.claude/CLAUDE.md written
 
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 echo "=== test-fresh-install ==="
@@ -17,13 +18,17 @@ run_setup "$SANDBOX"
 assert_file "context dir created"        "$SANDBOX/ai-context/CLAUDE.md"
 assert_file "templates/session.md"       "$SANDBOX/ai-context/templates/session.md"
 assert_file "templates/idea.md"          "$SANDBOX/ai-context/templates/idea.md"
-[[ -d "$SANDBOX/ai-context/sessions" ]] && _pass "sessions/ dir" || _fail "sessions/ dir" "exists" "missing"
-[[ -d "$SANDBOX/ai-context/ideas" ]] && _pass "ideas/ dir" || _fail "ideas/ dir" "exists" "missing"
+if [[ -d "$SANDBOX/ai-context/sessions" ]]; then _pass "sessions/ dir"; else _fail "sessions/ dir" "exists" "missing"; fi
+if [[ -d "$SANDBOX/ai-context/ideas" ]];    then _pass "ideas/ dir";    else _fail "ideas/ dir"    "exists" "missing"; fi
 
 # Hooks
 for hook in ai-context-check ai-context-session-doc-check ai-context-session-doc-staleness ai-context-gbrain-sync; do
-  assert_file "hook: $hook"              "$SANDBOX/.claude/hooks/$hook.sh"
-  [[ -x "$SANDBOX/.claude/hooks/$hook.sh" ]] && _pass "hook executable: $hook" || _fail "hook executable: $hook" "yes" "no"
+  assert_file "hook: $hook" "$SANDBOX/.claude/hooks/$hook.sh"
+  if [[ -x "$SANDBOX/.claude/hooks/$hook.sh" ]]; then
+    _pass "hook executable: $hook"
+  else
+    _fail "hook executable: $hook" "yes" "no"
+  fi
 done
 
 # settings.json hook keys

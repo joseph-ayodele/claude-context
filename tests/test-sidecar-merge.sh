@@ -4,6 +4,7 @@
 #   - write its proposed content to .ai-context-proposed sidecars
 #   - have the SessionStart hook surface a merge prompt naming both sidecars
 
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 echo "=== test-sidecar-merge ==="

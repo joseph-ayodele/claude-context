@@ -2,6 +2,7 @@
 # Regression test for the T1 P0 bug: HOME with spaces in the path must
 # produce hooks and an alias that actually work.
 
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 echo "=== test-quoted-paths ==="

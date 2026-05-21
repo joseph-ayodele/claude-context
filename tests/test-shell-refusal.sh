@@ -2,6 +2,7 @@
 # --yes mode must refuse fish/nushell/etc. so users don't get a zsh-syntax
 # alias dropped into a file their shell doesn't read.
 
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 echo "=== test-shell-refusal ==="

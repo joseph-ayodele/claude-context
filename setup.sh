@@ -232,16 +232,12 @@ CONTEXT_DIR="${CONTEXT_DIR/#\~/$HOME}"   # expand ~
 
 if [[ -d "$CONTEXT_DIR" ]]; then
   ok "Using existing directory: $CONTEXT_DIR"
-  CONTEXT_DIR_EXISTED=1
+elif confirm "Directory does not exist. Create it?"; then
+  mkdir -p "$CONTEXT_DIR"
+  ok "Created $CONTEXT_DIR"
 else
-  if confirm "Directory does not exist. Create it?"; then
-    mkdir -p "$CONTEXT_DIR"
-    ok "Created $CONTEXT_DIR"
-    CONTEXT_DIR_EXISTED=0
-  else
-    err "Aborted — context directory is required."
-    exit 1
-  fi
+  err "Aborted — context directory is required."
+  exit 1
 fi
 
 ALIAS_NAME="$(ask "Shell alias to launch claude with this context" "$DEFAULT_ALIAS")"

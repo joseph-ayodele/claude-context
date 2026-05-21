@@ -7,6 +7,7 @@
 # the second condition: a sandboxed HOME has no ~/.gbrain/config.json, so
 # the hook should silently skip even when the real gbrain CLI is installed.
 
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 echo "=== test-gbrain-skip ==="

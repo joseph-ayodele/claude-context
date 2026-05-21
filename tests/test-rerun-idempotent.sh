@@ -2,6 +2,7 @@
 # Re-running setup is idempotent: same hook count, same alias count, no
 # duplicate entries in settings.json, user-edited templates preserved.
 
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 echo "=== test-rerun-idempotent ==="

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # install → uninstall → final state should be clean.
 
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 echo "=== test-uninstall ==="
