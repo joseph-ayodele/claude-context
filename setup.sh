@@ -545,8 +545,22 @@ status_body=""
 [[ -f "\$STATUS_FILE" ]] && status_body="\$(cat "\$STATUS_FILE")"
 
 existing_today=""
+placeholder_created=""
 if [[ -d "\$SESSIONS_DIR" ]]; then
   existing_today="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
+
+  # If no doc for today exists, write a placeholder so the UserPromptSubmit
+  # hook doesn't block the user's very first prompt of a fresh session.
+  # Claude renames + fills in the Task section on its first substantive turn.
+  if [[ -z "\$existing_today" ]]; then
+    placeholder_path="\$SESSIONS_DIR/\${today_iso}_session_pending.md"
+    template_path="$CONTEXT_DIR/templates/session.md"
+    if [[ -f "\$template_path" && ! -e "\$placeholder_path" ]]; then
+      cp "\$template_path" "\$placeholder_path"
+      placeholder_created="\$placeholder_path"
+      existing_today="\$placeholder_path"
+    fi
+  fi
 fi
 
 context_body="SESSION-START CHECKLIST (from ~/.claude/CLAUDE.md):
@@ -564,15 +578,15 @@ STATUS FILE CONTENTS (~/.claude/ai-context-status.md):
 ---"
 fi
 
-if [[ -n "\$existing_today" ]]; then
+if [[ -n "\$placeholder_created" ]]; then
+  context_body="\$context_body
+
+A placeholder session doc has been auto-created at \$placeholder_created (template-only contents). On your first substantive turn, RENAME it to \${today_iso}_<repo>_<task-slug>.md and fill in the Task section based on the user's first prompt. The placeholder satisfies the UserPromptSubmit hook so you won't be blocked — but renaming + filling is on you."
+elif [[ -n "\$existing_today" ]]; then
   context_body="\$context_body
 
 NOTE: A session doc for today already exists: \$existing_today
 Read it and continue updating it instead of creating a new one, unless this is a genuinely unrelated task."
-else
-  context_body="\$context_body
-
-NO session doc exists for today (\$today_iso). You MUST create one in \$SESSIONS_DIR/ before ending your first response. The UserPromptSubmit hook will keep reminding you until you do."
 fi
 
 if [[ -n "\$sidecars" ]]; then
