@@ -44,11 +44,22 @@ assert_contains "context names the placeholder" "${TODAY}_session_pending.md" "$
 ups_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-session-doc-check.sh" <<<'{}' || true)
 assert_eq "UserPromptSubmit silent when placeholder exists" "" "$ups_out"
 
-# Re-running SessionStart must NOT create a second placeholder when one exists
-mtime_before=$(stat -f %m "$PLACEHOLDER" 2>/dev/null || stat -c %Y "$PLACEHOLDER" 2>/dev/null)
+# Re-running SessionStart must NOT create a second placeholder when one exists.
+# Portable mtime: GNU stat uses -c %Y; BSD stat uses -f %m. Try BSD first
+# (matches macOS dev), fall back to GNU (CI Ubuntu). On BSD `stat -c` fails;
+# on GNU `stat -f` returns filesystem info instead of mtime, so we can't
+# rely on `||` chaining alone — branch on `uname` to be unambiguous.
+file_mtime() {
+  if [[ "$(uname)" == "Darwin" ]]; then
+    stat -f %m "$1"
+  else
+    stat -c %Y "$1"
+  fi
+}
+mtime_before=$(file_mtime "$PLACEHOLDER")
 sleep 1
 HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null >/dev/null
-mtime_after=$(stat -f %m "$PLACEHOLDER" 2>/dev/null || stat -c %Y "$PLACEHOLDER" 2>/dev/null)
+mtime_after=$(file_mtime "$PLACEHOLDER")
 assert_eq "placeholder not overwritten on re-run" "$mtime_before" "$mtime_after"
 
 # If a real (renamed) doc already exists, placeholder must NOT be created
