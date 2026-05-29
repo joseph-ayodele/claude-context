@@ -70,4 +70,27 @@ HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null >/d
 assert_no_file "placeholder skipped when a real doc exists" "$PLACEHOLDER"
 assert_file "real doc still in place" "$RENAMED"
 
+# --- Midnight rollover scenario ---
+# A session resumed across midnight: SessionStart doesn't re-fire on resume,
+# so the first UserPromptSubmit of the new day finds no doc for today.
+# UserPromptSubmit must auto-create the placeholder + inject context, NOT block.
+rm -f "$RENAMED"
+assert_no_file "clean slate for rollover test" "$PLACEHOLDER"
+
+ups_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-session-doc-check.sh" <<<'{}')
+ups_exit=$?
+assert_eq "UserPromptSubmit exits 0 (not blocking)" "0" "$ups_exit"
+assert_file "UserPromptSubmit auto-creates placeholder on rollover" "$PLACEHOLDER"
+
+# Output must be valid JSON with hookSpecificOutput, NOT decision:block
+ups_decision=$(echo "$ups_out" | jq -r '.decision // ""')
+assert_eq "UserPromptSubmit does not return decision=block" "" "$ups_decision"
+
+ups_ctx=$(echo "$ups_out" | jq -r '.hookSpecificOutput.additionalContext // ""')
+assert_contains "UserPromptSubmit context tells Claude to rename" "RENAME" "$ups_ctx"
+
+# Second UserPromptSubmit on the same turn — placeholder now exists, silent
+ups_out2=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-session-doc-check.sh" <<<'{}')
+assert_eq "UserPromptSubmit silent on re-run with placeholder present" "" "$ups_out2"
+
 finish

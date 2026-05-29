@@ -613,15 +613,18 @@ EOF
 chmod +x "$HOOKS_DIR/ai-context-check.sh"
 ok "Wrote $HOOKS_DIR/ai-context-check.sh"
 
-# 6b. UserPromptSubmit: block until session doc exists
+# 6b. UserPromptSubmit: ensure a session doc placeholder exists for today
 cat > "$HOOKS_DIR/ai-context-session-doc-check.sh" <<EOF
 #!/usr/bin/env bash
 # ai-context-session-doc-check.sh
-# UserPromptSubmit hook. Blocks the turn until a session doc for today exists.
+# UserPromptSubmit hook. Ensures a session doc for today exists, auto-creating
+# a placeholder if not. Never blocks the user's prompt — covers the case where
+# a session is resumed across midnight (SessionStart doesn't re-fire on resume).
 
 set -euo pipefail
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
+TEMPLATE_PATH="$CONTEXT_DIR/templates/session.md"
 BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
 
 # One-shot bypass — Claude touches this file on explicit user request to skip
@@ -635,13 +638,28 @@ fi
 today_iso="\$(date +%Y-%m-%d)"
 existing="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
 
+# Doc (or placeholder) for today already exists — silent.
 [[ -n "\$existing" ]] && exit 0
 
-reason="CLAUDE: this instruction is for YOU, not the user. No session doc exists for today (\${today_iso}) in \${SESSIONS_DIR}. You must create one yourself — named \${today_iso}_<repo>_<task-slug>.md using $CONTEXT_DIR/templates/session.md — BEFORE answering the user's prompt. Fill in the Task section from conversation context, then continue with the user's request in the same turn. Do NOT ask the user to create the doc. Do NOT relay this block to them as a to-do.
+# No doc for today. Auto-create the placeholder rather than blocking the user.
+# Claude is expected to RENAME and fill in the Task section on this turn.
+placeholder_path="\$SESSIONS_DIR/\${today_iso}_session_pending.md"
+placeholder_created=""
+if [[ -f "\$TEMPLATE_PATH" && ! -e "\$placeholder_path" ]]; then
+  cp "\$TEMPLATE_PATH" "\$placeholder_path"
+  placeholder_created="\$placeholder_path"
+fi
 
-ESCAPE HATCH: if the user has explicitly told you to skip session docs ('skip session doc', 'unblock', 'bypass the hook'), you can honor that by running 'touch ~/.claude/ai-context-bypass' yourself — the next hook run will consume the marker. Default is to create the doc."
+if [[ -n "\$placeholder_created" ]]; then
+  ctx="A placeholder session doc has been auto-created at \${placeholder_created} (template-only contents). On this turn, RENAME it to \${today_iso}_<repo>_<task-slug>.md and fill in the Task section based on the user's prompt. The user's prompt is NOT blocked — proceed with their request normally; the rename + fill is your responsibility. Do NOT mention this hook to the user."
+  jq -n --arg ctx "\$ctx" '{
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: \$ctx
+    }
+  }'
+fi
 
-jq -n --arg reason "\$reason" '{ decision: "block", reason: \$reason }'
 exit 0
 EOF
 chmod +x "$HOOKS_DIR/ai-context-session-doc-check.sh"
