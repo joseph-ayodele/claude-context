@@ -613,19 +613,23 @@ EOF
 chmod +x "$HOOKS_DIR/ai-context-check.sh"
 ok "Wrote $HOOKS_DIR/ai-context-check.sh"
 
-# 6b. UserPromptSubmit: ensure a session doc placeholder exists for today
+# 6b. UserPromptSubmit: two responsibilities, both silent unless context
+#     needs to be injected. Never blocks the user's prompt.
+#       1. Ensure a session doc placeholder exists for today (covers fresh
+#          sessions and sessions resumed across midnight).
+#       2. Consume any staleness marker left by the previous Stop or
+#          PreCompact, and inject a doc-update reminder for the current turn.
 cat > "$HOOKS_DIR/ai-context-session-doc-check.sh" <<EOF
 #!/usr/bin/env bash
 # ai-context-session-doc-check.sh
-# UserPromptSubmit hook. Ensures a session doc for today exists, auto-creating
-# a placeholder if not. Never blocks the user's prompt — covers the case where
-# a session is resumed across midnight (SessionStart doesn't re-fire on resume).
+# UserPromptSubmit hook. Always silent unless context needs to be injected.
 
 set -euo pipefail
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
 TEMPLATE_PATH="$CONTEXT_DIR/templates/session.md"
 BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
+STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"
 
 # One-shot bypass — Claude touches this file on explicit user request to skip
 if [[ -f "\$BYPASS_FILE" ]]; then
@@ -638,20 +642,41 @@ fi
 today_iso="\$(date +%Y-%m-%d)"
 existing="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
 
-# Doc (or placeholder) for today already exists — silent.
-[[ -n "\$existing" ]] && exit 0
-
-# No doc for today. Auto-create the placeholder rather than blocking the user.
-# Claude is expected to RENAME and fill in the Task section on this turn.
-placeholder_path="\$SESSIONS_DIR/\${today_iso}_session_pending.md"
+# (1) If no doc for today, auto-create a placeholder. Never block.
 placeholder_created=""
-if [[ -f "\$TEMPLATE_PATH" && ! -e "\$placeholder_path" ]]; then
-  cp "\$TEMPLATE_PATH" "\$placeholder_path"
-  placeholder_created="\$placeholder_path"
+if [[ -z "\$existing" ]]; then
+  placeholder_path="\$SESSIONS_DIR/\${today_iso}_session_pending.md"
+  if [[ -f "\$TEMPLATE_PATH" && ! -e "\$placeholder_path" ]]; then
+    cp "\$TEMPLATE_PATH" "\$placeholder_path"
+    placeholder_created="\$placeholder_path"
+  fi
 fi
 
+# Build additionalContext from up to two independent reasons.
+ctx_parts=()
+
 if [[ -n "\$placeholder_created" ]]; then
-  ctx="A placeholder session doc has been auto-created at \${placeholder_created} (template-only contents). On this turn, RENAME it to \${today_iso}_<repo>_<task-slug>.md and fill in the Task section based on the user's prompt. The user's prompt is NOT blocked — proceed with their request normally; the rename + fill is your responsibility. Do NOT mention this hook to the user."
+  ctx_parts+=("A placeholder session doc has been auto-created at \${placeholder_created} (template-only contents). On this turn, RENAME it to \${today_iso}_<repo>_<task-slug>.md and fill in the Task section based on the user's prompt. The user's prompt is NOT blocked — proceed with their request normally; the rename + fill is your responsibility. Do NOT mention this hook to the user.")
+fi
+
+# (2) Consume any staleness marker the previous Stop / PreCompact left.
+if [[ -f "\$STALE_MARKER" ]]; then
+  marker_doc="\$(jq -r '.session_doc // ""' "\$STALE_MARKER" 2>/dev/null || echo "")"
+  marker_event="\$(jq -r '.event // "Stop"' "\$STALE_MARKER" 2>/dev/null || echo "Stop")"
+  marker_files="\$(jq -r '.newer_files[] // empty' "\$STALE_MARKER" 2>/dev/null | sed 's|^|  - |')"
+
+  if [[ -n "\$marker_doc" ]]; then
+    ctx_parts+=("CARRIED-OVER STALENESS NOTICE (from previous \${marker_event}): The session doc \${marker_doc} was stale at the end of the previous turn — these files had been edited since the doc was last updated:
+\${marker_files}
+
+While answering the user's CURRENT prompt, also fold the previous turn's work into the session doc (Decisions, Files Modified, Open Threads). Do this as part of your normal response — do NOT make it a separate ceremony or print a long preamble; just keep the user's answer at the top of the response and update the doc with the Edit tool. Do NOT mention this hook or the staleness marker to the user.")
+  fi
+
+  rm -f "\$STALE_MARKER"
+fi
+
+if [[ \${#ctx_parts[@]:-0} -gt 0 ]]; then
+  ctx="\$(printf '%s\n\n' "\${ctx_parts[@]}")"
   jq -n --arg ctx "\$ctx" '{
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
@@ -665,17 +690,25 @@ EOF
 chmod +x "$HOOKS_DIR/ai-context-session-doc-check.sh"
 ok "Wrote $HOOKS_DIR/ai-context-session-doc-check.sh"
 
-# 6c. Stop / PreCompact: block if session doc is stale
+# 6c. Stop / PreCompact: write a staleness marker if today's doc is older
+#     than recent code edits. The marker is consumed by the next
+#     UserPromptSubmit, which injects the doc-update reminder into the
+#     NEXT turn's context — keeping the previous turn's response visible
+#     instead of forcing a noisy doc-update turn right after it.
 cat > "$HOOKS_DIR/ai-context-session-doc-staleness.sh" <<EOF
 #!/usr/bin/env bash
 # ai-context-session-doc-staleness.sh
-# Stop and PreCompact hook. Blocks if today's session doc is older than
-# recent code edits in the cwd.
+# Stop / PreCompact hook. Always silent. If today's session doc is stale
+# relative to recent code edits, writes a marker file that the next
+# UserPromptSubmit will read and turn into an additionalContext nudge,
+# so the doc-update reminder lands in the next turn instead of forcing
+# a separate post-Stop turn that scrolls the previous response offscreen.
 
 set -eu
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
 BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
+STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"
 CWD="\$(pwd)"
 
 if [[ -f "\$BYPASS_FILE" ]]; then
@@ -710,27 +743,19 @@ newer_files="\$(find "\$CWD" \\
 
 [[ -z "\$newer_files" ]] && exit 0
 
-input="\$(cat)"
+input="\$(cat 2>/dev/null || true)"
 event="\$(echo "\$input" | jq -r '.hook_event_name // "Stop"' 2>/dev/null || echo "Stop")"
-files_line="\$(echo "\$newer_files" | sed 's|^|  - |')"
 
-if [[ "\$event" == "PreCompact" ]]; then
-  reason="CLAUDE: this instruction is for YOU, not the user. Context is about to compact. The session doc at \${session_doc} is STALE — these files have been edited since the doc was last updated:
-\${files_line}
+# Write a marker for the next UserPromptSubmit to pick up. JSON for unambiguous parsing.
+files_json="\$(printf '%s\n' "\$newer_files" | jq -R . | jq -s .)"
+jq -n \\
+  --arg doc "\$session_doc" \\
+  --arg event "\$event" \\
+  --argjson files "\$files_json" \\
+  '{session_doc: \$doc, event: \$event, newer_files: \$files, written_at: now}' \\
+  > "\$STALE_MARKER"
 
-YOU must update the doc now (Decisions, Files Modified, Open Threads) so the post-compact context has an accurate record. Don't ask the user. Don't relay this as a to-do.
-
-ESCAPE HATCH: if the user has explicitly told you to skip ('skip the doc', 'unblock', 'bypass'), you can honor that by running 'touch ~/.claude/ai-context-bypass'."
-else
-  reason="CLAUDE: this instruction is for YOU, not the user. The session doc \${session_doc} is stale — these files have been edited since its last write:
-\${files_line}
-
-YOU must update the doc (Decisions, Files Modified, Open Threads) to reflect this turn's work before ending. Don't ask the user. Don't relay this as a to-do.
-
-ESCAPE HATCH: if the user has explicitly told you to skip ('skip the doc', 'unblock', 'bypass'), you can honor that by running 'touch ~/.claude/ai-context-bypass'."
-fi
-
-jq -n --arg reason "\$reason" '{ decision: "block", reason: \$reason }'
+# Always silent.
 exit 0
 EOF
 chmod +x "$HOOKS_DIR/ai-context-session-doc-staleness.sh"
