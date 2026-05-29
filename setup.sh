@@ -676,7 +676,10 @@ While answering the user's CURRENT prompt, also fold the previous turn's work in
   rm -f "\$STALE_MARKER"
 fi
 
-if [[ \${#ctx_parts[@]:-0} -gt 0 ]]; then
+# Empty-array length under \`set -u\` is fine in bash 4+, but \`\${#arr[@]:-0}\`
+# is invalid syntax (only scalars accept :-default). Use a presence test
+# that's safe across bash versions: emit JSON only if any part was added.
+if [[ "\${ctx_parts[*]+set}" == "set" ]]; then
   ctx="\$(printf '%s\n\n' "\${ctx_parts[@]}")"
   jq -n --arg ctx "\$ctx" '{
     hookSpecificOutput: {
@@ -725,9 +728,15 @@ session_doc="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*
 
 [[ -z "\$session_doc" ]] && exit 0
 
-# Grace period — fresh doc within the last hour is fine
+# Grace period — fresh doc within the last hour is fine. Branch on uname
+# because \`stat -f %m\` on GNU misparses as a format-string flag (exits 0 with
+# garbage), so \`||\` to \`stat -c %Y\` never fires.
 GRACE_SECONDS=3600
-doc_mtime="\$(stat -f %m "\$session_doc" 2>/dev/null || stat -c %Y "\$session_doc" 2>/dev/null || echo 0)"
+if [[ "\$(uname)" == "Darwin" ]]; then
+  doc_mtime="\$(stat -f %m "\$session_doc" 2>/dev/null || echo 0)"
+else
+  doc_mtime="\$(stat -c %Y "\$session_doc" 2>/dev/null || echo 0)"
+fi
 now="\$(date +%s)"
 (( now - doc_mtime < GRACE_SECONDS )) && exit 0
 
