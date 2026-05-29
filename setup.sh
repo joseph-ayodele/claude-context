@@ -565,9 +565,10 @@ fi
 
 context_body="SESSION-START CHECKLIST (from ~/.claude/CLAUDE.md):
 
-1. Open your first reply with 'sweet potato 🍠' on its own line (the handshake).
-2. If ~/.claude/ai-context-status.md exists, act on its findings after the user's first request. Don't silently rewrite anything — offer and wait for approval.
-3. Create a session doc at \$SESSIONS_DIR/\${today_iso}_<repo>_<task-slug>.md using templates/session.md. Update it as work progresses."
+1. If ~/.claude/ai-context-status.md exists, act on its findings after the user's first request. Don't silently rewrite anything — offer and wait for approval.
+2. Create a session doc at \$SESSIONS_DIR/\${today_iso}_<repo>_<task-slug>.md using templates/session.md. Update it as work progresses.
+
+Note: the sweet-potato handshake is the user's diagnostic that ~/.claude/CLAUDE.md actually loaded. Do NOT say it because this hook tells you to — say it because you read the rule from CLAUDE.md itself."
 
 if [[ -n "\$status_body" ]]; then
   context_body="\$context_body

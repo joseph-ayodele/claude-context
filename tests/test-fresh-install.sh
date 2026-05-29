@@ -51,7 +51,10 @@ assert_contains "global has handshake" "sweet potato" "$content"
 # SessionStart hook produces valid JSON with the checklist
 hook_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null)
 ctx=$(echo "$hook_out" | jq -r '.hookSpecificOutput.additionalContext')
-assert_contains "SessionStart injects sweet potato" "sweet potato" "$ctx"
+# The handshake must NOT be in the hook payload — it's a CLAUDE.md-only
+# diagnostic, and saying it should imply the rules loaded, not that the
+# hook fired. Hook nagging would render the diagnostic meaningless.
+assert_not_contains "SessionStart does NOT instruct the handshake" "Open your first reply with 'sweet potato" "$ctx"
 assert_contains "SessionStart names sessions dir" "$SANDBOX/ai-context/sessions" "$ctx"
 
 finish

@@ -72,6 +72,15 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local label="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    _pass "$label"
+  else
+    _fail "$label" "(does not contain) $needle" "$haystack"
+  fi
+}
+
 assert_file() {
   local label="$1" path="$2"
   if [[ -f "$path" ]]; then
