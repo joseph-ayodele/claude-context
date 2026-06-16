@@ -380,9 +380,10 @@ Sessions are organized by **task**, not by date. Each session doc lives at
 and a list of session files).
 
 **Slug rules:**
-- Human-readable, kebab-case (\`auth-bug-fix\`, \`docs-refresh\`, \`migrate-to-postgres\`).
+- Human-readable, kebab-case (\`auth-fix\`, \`docs-refresh\`, \`migrate-to-postgres\`).
+- Don't suffix the category. The slug already lives under \`sessions/tasks/\`, so \`-task\`/\`-feature\`/\`-bug\` is redundant noise. Slug describes the work, not the kind.
 - Must be unique within \`sessions/tasks/\`. On collision, append \`-2\`, \`-3\`, etc.
-- If the task tracks an external ticket, the ticket key may appear as a suffix (\`auth-bug-fix-acme-123\`), never a prefix.
+- If the task tracks an external ticket, the ticket key may appear as a suffix (\`auth-fix-acme-123\`), never a prefix.
 
 **Continuing vs. starting:**
 - The SessionStart hook surfaces active task slugs. After the user's first message, decide if it's continuing one of those tasks (matches a slug, references the same ticket, talks about the same artifact). If yes, drop the new file under that slug's folder and read the most recent session file there before responding. If new and the slug is clear, confirm once before creating the folder. If unclear, drop into \`sessions/tasks/_inbox/<YYYY-MM-DD>_<temporary-slug>.md\` and \`mv\` later when the slug crystallizes.
@@ -398,7 +399,7 @@ Update each session doc as decisions are made and significant work lands. Before
 
 ## Session-end graduate flow
 
-Sessions feed; the knowledge core (\`repos/*.md\`, \`Notes/*.md\`, \`ideas/*.md\`, \`MEMORY.md\`) is the destination. The graduate flow is where compounding happens — without it, sessions are write-only and the knowledge core stagnates.
+Sessions feed; the knowledge core (\`repos/*.md\`, \`notes/*.md\`, \`ideas/*.md\`, \`MEMORY.md\`) is the destination. The graduate flow is where compounding happens — without it, sessions are write-only and the knowledge core stagnates.
 
 **Trigger:** ONE of these explicit cues from the user — "we're done", "wrap this up", "wrap up", "/graduate". Do NOT trigger on ambient "great" / "thanks" / "that's it" / "let's stop".
 
@@ -744,7 +745,12 @@ TASKS_DIR="\$SESSIONS_DIR/tasks"
 INBOX_DIR="\$TASKS_DIR/_inbox"
 TEMPLATE_PATH="$CONTEXT_DIR/templates/session.md"
 BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
-STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"
+STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"  # legacy global marker (cleaned up if present)
+
+# Read the hook event JSON from stdin once — UserPromptSubmit hooks receive
+# session_id, transcript_path, hook_event_name, etc. We use it for the
+# per-session-id staleness marker below.
+INPUT_JSON="\$(cat 2>/dev/null || true)"
 
 # One-shot bypass — Claude touches this file on explicit user request to skip
 if [[ -f "\$BYPASS_FILE" ]]; then
@@ -784,21 +790,28 @@ if [[ -n "\$placeholder_created" ]]; then
   ctx_parts+=("A placeholder session doc has been auto-created at \${placeholder_created} under sessions/tasks/_inbox/. On this turn, decide whether to MOVE the file into an existing task folder under sessions/tasks/<slug>/ (continuing work), or rename it inside _inbox/ as \${today_iso}_<temp-slug>.md (still figuring out what this is). See the project's CLAUDE.md \"Session Management — task-folder shape\" for slug rules. The user's prompt is NOT blocked — proceed with their request normally; file placement is your responsibility. Do NOT mention this hook to the user.")
 fi
 
-# (2) Consume any staleness marker the previous Stop / PreCompact left.
-if [[ -f "\$STALE_MARKER" ]]; then
-  marker_doc="\$(jq -r '.session_doc // ""' "\$STALE_MARKER" 2>/dev/null || echo "")"
-  marker_event="\$(jq -r '.event // "Stop"' "\$STALE_MARKER" 2>/dev/null || echo "Stop")"
-  marker_files="\$(jq -r '.newer_files[] // empty' "\$STALE_MARKER" 2>/dev/null | sed 's|^|  - |')"
+# (2) Per-session stale marker. Stop/PreCompact hook writes one when context-
+# pressure signals fire (PreCompact event, transcript size > 1.5MB, or 90+ min
+# idle). Per-session_id keying ensures parallel conductors don't pollute each
+# other. Inject a SOFT NUDGE so Claude considers folding decisions/edits/open
+# threads into the active doc — without prescribing specific files.
+session_id="\$(printf '%s' "\$INPUT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
+if [[ -n "\$session_id" ]]; then
+  PER_SESSION_MARKER="\$HOME/.claude/ai-context-stale-marker-\${session_id}"
+  if [[ -f "\$PER_SESSION_MARKER" ]]; then
+    marker_doc="\$(jq -r '.session_doc // ""' "\$PER_SESSION_MARKER" 2>/dev/null || echo "")"
+    marker_reasons="\$(jq -r '.reasons | join(", ")' "\$PER_SESSION_MARKER" 2>/dev/null || echo "")"
 
-  if [[ -n "\$marker_doc" ]]; then
-    ctx_parts+=("CARRIED-OVER STALENESS NOTICE (from previous \${marker_event}): The session doc \${marker_doc} was stale at the end of the previous turn — these files had been edited since the doc was last updated:
-\${marker_files}
+    if [[ -n "\$marker_doc" ]]; then
+      ctx_parts+=("CONTEXT-PRESSURE NOTICE (signals: \${marker_reasons}): The active session doc at \${marker_doc} hasn't been updated recently relative to conversation progress. As you answer the user's CURRENT prompt, also consider whether any decisions, file edits, or open threads from recent turns are worth folding into that doc — write them with the Edit tool. If the recent turns produced nothing worth recording (or the conversation is on a different task than what that doc tracks), ignore this nudge entirely. Do NOT mention this hook or the marker to the user.")
+    fi
 
-While answering the user's CURRENT prompt, also fold the previous turn's work into the session doc (Decisions, Files Modified, Open Threads). Do this as part of your normal response — do NOT make it a separate ceremony or print a long preamble; just keep the user's answer at the top of the response and update the doc with the Edit tool. Do NOT mention this hook or the staleness marker to the user.")
+    rm -f "\$PER_SESSION_MARKER"
   fi
-
-  rm -f "\$STALE_MARKER"
 fi
+
+# Legacy global marker — clean up if present (left by older versions of the hook).
+[[ -f "\$STALE_MARKER" ]] && rm -f "\$STALE_MARKER"
 
 # Empty-array length under \`set -u\` is fine in bash 4+, but \`\${#arr[@]:-0}\`
 # is invalid syntax (only scalars accept :-default). Use a presence test
@@ -826,19 +839,25 @@ ok "Wrote $HOOKS_DIR/ai-context-session-doc-check.sh"
 cat > "$HOOKS_DIR/ai-context-session-doc-staleness.sh" <<EOF
 #!/usr/bin/env bash
 # ai-context-session-doc-staleness.sh
-# Stop / PreCompact hook. Always silent. If today's session doc is stale
-# relative to recent code edits, writes a marker file that the next
-# UserPromptSubmit will read and turn into an additionalContext nudge,
-# so the doc-update reminder lands in the next turn instead of forcing
-# a separate post-Stop turn that scrolls the previous response offscreen.
+# Stop / PreCompact hook. Always silent. Writes a per-session "context-pressure"
+# marker when the conversation has accumulated enough state that the active
+# session doc should be brought up to date. Triggers (any one fires):
+#   - PreCompact event
+#   - Transcript size > THRESHOLD_BYTES (default 1.5 MB ≈ ~150k tokens proxy)
+#   - Idle: > IDLE_SECONDS since the active session doc was last edited
+#     (default 5400s = 90 min)
+#
+# Per-session_id keying ensures parallel conductors don't pollute each other.
 
 set -eu
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
 TASKS_DIR="\$SESSIONS_DIR/tasks"
 BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
-STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"
 CWD="\$(pwd)"
+
+IDLE_SECONDS="\${AI_CONTEXT_IDLE_SECONDS:-5400}"
+THRESHOLD_BYTES="\${AI_CONTEXT_TRANSCRIPT_THRESHOLD:-1572864}"
 
 if [[ -f "\$BYPASS_FILE" ]]; then
   rm -f "\$BYPASS_FILE"
@@ -847,15 +866,19 @@ fi
 
 [[ ! -d "\$SESSIONS_DIR" ]] && exit 0
 
+input="\$(cat 2>/dev/null || true)"
+event="\$(printf '%s' "\$input" | jq -r '.hook_event_name // "Stop"' 2>/dev/null || echo "Stop")"
+session_id="\$(printf '%s' "\$input" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
+transcript_path="\$(printf '%s' "\$input" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")"
+
+[[ -z "\$session_id" ]] && exit 0
+
+STALE_MARKER="\$HOME/.claude/ai-context-stale-marker-\${session_id}"
 today_iso="\$(date +%Y-%m-%d)"
 
-# Look for today's session doc in BOTH the task-folder shape and the legacy
-# daily-shape, take the most recently modified.
-#
-# IMPORTANT: GNU xargs runs the command even with empty stdin (BSD xargs
-# does not), which on Linux makes \`find ... | xargs ls -t | head -1\` return a
-# random file from CWD when find finds nothing. Pipe through a length check
-# (-z) before xargs to keep the behaviour identical across platforms.
+# Find today's session doc in BOTH the task-folder shape and the legacy
+# daily-shape. Guard the xargs pipeline against empty input (GNU xargs runs
+# the command anyway; BSD doesn't).
 session_doc=""
 if [[ -d "\$TASKS_DIR" ]]; then
   task_matches="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null)"
@@ -872,44 +895,44 @@ fi
 
 [[ -z "\$session_doc" ]] && exit 0
 
-# Grace period — fresh doc within the last hour is fine. Branch on uname
-# because \`stat -f %m\` on GNU misparses as a format-string flag (exits 0 with
-# garbage), so \`||\` to \`stat -c %Y\` never fires.
-GRACE_SECONDS=3600
+# Compute signals — use uname-branched stat for portable mtime/size.
 if [[ "\$(uname)" == "Darwin" ]]; then
   doc_mtime="\$(stat -f %m "\$session_doc" 2>/dev/null || echo 0)"
+  transcript_size=0
+  [[ -n "\$transcript_path" && -f "\$transcript_path" ]] && transcript_size="\$(stat -f %z "\$transcript_path" 2>/dev/null || echo 0)"
 else
   doc_mtime="\$(stat -c %Y "\$session_doc" 2>/dev/null || echo 0)"
+  transcript_size=0
+  [[ -n "\$transcript_path" && -f "\$transcript_path" ]] && transcript_size="\$(stat -c %s "\$transcript_path" 2>/dev/null || echo 0)"
 fi
 now="\$(date +%s)"
-(( now - doc_mtime < GRACE_SECONDS )) && exit 0
+idle_seconds=\$(( now - doc_mtime ))
 
-# Find files in cwd newer than the session doc, ignoring noise
-newer_files="\$(find "\$CWD" \\
-  -type d \\( \\
-    -name .git -o -name node_modules -o -name target -o -name logs -o \\
-    -name dist -o -name build -o -name .claude -o -name .idea -o \\
-    -name .vscode -o -name .next -o -name .venv -o -name venv \\
-  \\) -prune -o \\
-  -type f -newer "\$session_doc" \\
-  ! -name '.DS_Store' \\
-  -print 2>/dev/null | head -5 || true)"
+reasons=""
+[[ "\$event" == "PreCompact" ]] && reasons+="precompact "
+(( transcript_size >= THRESHOLD_BYTES )) && reasons+="transcript_size "
+(( idle_seconds >= IDLE_SECONDS )) && reasons+="idle "
 
-[[ -z "\$newer_files" ]] && exit 0
+[[ -z "\$reasons" ]] && exit 0
+reasons="\${reasons% }"
 
-input="\$(cat 2>/dev/null || true)"
-event="\$(echo "\$input" | jq -r '.hook_event_name // "Stop"' 2>/dev/null || echo "Stop")"
-
-# Write a marker for the next UserPromptSubmit to pick up. JSON for unambiguous parsing.
-files_json="\$(printf '%s\n' "\$newer_files" | jq -R . | jq -s .)"
 jq -n \\
   --arg doc "\$session_doc" \\
   --arg event "\$event" \\
-  --argjson files "\$files_json" \\
-  '{session_doc: \$doc, event: \$event, newer_files: \$files, written_at: now}' \\
-  > "\$STALE_MARKER"
+  --arg session_id "\$session_id" \\
+  --arg reasons "\$reasons" \\
+  --argjson transcript_size "\$transcript_size" \\
+  --argjson idle_seconds "\$idle_seconds" \\
+  '{
+    session_doc: \$doc,
+    event: \$event,
+    session_id: \$session_id,
+    reasons: (\$reasons | split(" ")),
+    transcript_size: \$transcript_size,
+    idle_seconds: \$idle_seconds,
+    written_at: now
+  }' > "\$STALE_MARKER"
 
-# Always silent.
 exit 0
 EOF
 chmod +x "$HOOKS_DIR/ai-context-session-doc-staleness.sh"
