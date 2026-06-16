@@ -270,34 +270,67 @@ SHELL_RC="${SHELL_RC/#\~/$HOME}"
 
 info "Setting up context directory at $CONTEXT_DIR"
 
-mkdir -p "$CONTEXT_DIR/sessions" "$CONTEXT_DIR/templates" "$CONTEXT_DIR/ideas"
+mkdir -p "$CONTEXT_DIR/sessions" "$CONTEXT_DIR/sessions/tasks" "$CONTEXT_DIR/sessions/tasks/_inbox" "$CONTEXT_DIR/sessions/tasks/_misc" "$CONTEXT_DIR/templates" "$CONTEXT_DIR/ideas"
 
-# templates/session.md
+# templates/session.md — task-folder shape, with Where we are + Graduated
 SESSION_TPL="$CONTEXT_DIR/templates/session.md"
 if [[ ! -f "$SESSION_TPL" ]]; then
   cat > "$SESSION_TPL" <<'EOF'
 # Session: [TASK DESCRIPTION]
 
-Date: [YYYY-MM-DD]
-Repo: [repo name]
-Branch: [branch name]
-Related sessions: [links to prior sessions if continuing work]
+## Where we are
 
-## Task
-[What are we doing and why]
+[State at session start — what was done previously on this task, what's open. If continuing, paste from the prior session's Open Threads + add any morning context. If new task, the session's first goal.]
 
 ## Decisions
+
 - [Decision 1: what was decided and why]
 
 ## Files Modified
+
 - [path/to/file: what changed]
 
+## Graduated
+
+[Filled in at session end via the graduate flow. One line per item that flowed into the knowledge core. Format: `- <target-file>: <one-sentence what landed>`. Leave empty if nothing graduated.]
+
 ## Open Threads
+
 - [Unresolved question or next step]
 EOF
   ok "Wrote templates/session.md"
 else
   ok "templates/session.md already exists — left as is"
+fi
+
+# templates/task-index.md — INDEX.md template for task folders
+TASK_INDEX_TPL="$CONTEXT_DIR/templates/task-index.md"
+if [[ ! -f "$TASK_INDEX_TPL" ]]; then
+  cat > "$TASK_INDEX_TPL" <<'EOF'
+# Task: [HUMAN-READABLE TITLE]
+
+Slug: [slug-matching-folder-name]
+Started: [YYYY-MM-DD]
+Status: active
+JIRA: [IED-XXXXX or "(none)"]
+
+## Sessions
+
+- [YYYY-MM-DD_note.md] — [one-line recap]
+
+<!--
+INDEX.md is a session listing for this task folder.
+- Append a line under "## Sessions" each time a new dated session file is created.
+- Status values: active | paused | done.
+- Done tasks stay in place — no archival.
+- INDEX.md does NOT duplicate the graduated list. Each session file's
+  `## Graduated` section is the source of truth for what flowed into the
+  knowledge core.
+-->
+EOF
+  ok "Wrote templates/task-index.md"
+else
+  ok "templates/task-index.md already exists — left as is"
 fi
 
 # templates/idea.md
@@ -338,12 +371,51 @@ This file is loaded when you launch Claude with the \`$ALIAS_NAME\` alias
 (\`claude --add-dir $CONTEXT_DIR\`). It complements the universal rules in
 \`~/.claude/CLAUDE.md\`.
 
-## Session Management
+## Session Management — task-folder shape
 
-At the start of each session, create a file in \`$CONTEXT_DIR/sessions/\`
-named \`YYYY-MM-DD_<repo>_<task-slug>.md\` using \`templates/session.md\`.
-Update it as decisions are made and significant work lands. Before ending the
-session, capture: decisions made, files modified, open threads for next time.
+Sessions are organized by **task**, not by date. Each session doc lives at
+\`$CONTEXT_DIR/sessions/tasks/<task-slug>/<YYYY-MM-DD>_<note>.md\` and uses
+\`templates/session.md\`. Each task folder has an \`INDEX.md\` matching
+\`templates/task-index.md\` (slug, started date, \`Status: active|paused|done\`,
+and a list of session files).
+
+**Slug rules:**
+- Human-readable, kebab-case (\`auth-bug-fix\`, \`docs-refresh\`, \`migrate-to-postgres\`).
+- Must be unique within \`sessions/tasks/\`. On collision, append \`-2\`, \`-3\`, etc.
+- If the task tracks an external ticket, the ticket key may appear as a suffix (\`auth-bug-fix-acme-123\`), never a prefix.
+
+**Continuing vs. starting:**
+- The SessionStart hook surfaces active task slugs. After the user's first message, decide if it's continuing one of those tasks (matches a slug, references the same ticket, talks about the same artifact). If yes, drop the new file under that slug's folder and read the most recent session file there before responding. If new and the slug is clear, confirm once before creating the folder. If unclear, drop into \`sessions/tasks/_inbox/<YYYY-MM-DD>_<temporary-slug>.md\` and \`mv\` later when the slug crystallizes.
+
+**File-creation rule:**
+- Default: one new dated file per day per task folder. Within the same day, append to the existing file rather than create a second.
+
+**INDEX.md per task folder** is a session listing — append a one-liner under \`## Sessions\` whenever a new dated session file is created. INDEX.md does NOT duplicate what graduated; that lives in each session file's \`## Graduated\` section.
+
+**Miscellaneous work — \`_misc/\` daily log:** for one-off work that won't ever become a task (Slack pings, quick CLI checks, ad-hoc PR reviews), append to \`sessions/tasks/_misc/<YYYY-MM-DD>_misc.md\`. One file per day, multiple short entries (\`## heading\` + 1-3 lines each). No INDEX.md, no folder-per-entry. The \`_misc\` filename suffix is required so hooks find it via the \`<date>_*.md\` glob. Use \`_inbox/\` instead for exploratory work that might become a real task — \`_misc\` is for things that resolve same-session.
+
+Update each session doc as decisions are made and significant work lands. Before ending the session, fill: decisions, files modified, what graduated to the knowledge core, open threads for next time.
+
+## Session-end graduate flow
+
+Sessions feed; the knowledge core (\`repos/*.md\`, \`Notes/*.md\`, \`ideas/*.md\`, \`MEMORY.md\`) is the destination. The graduate flow is where compounding happens — without it, sessions are write-only and the knowledge core stagnates.
+
+**Trigger:** ONE of these explicit cues from the user — "we're done", "wrap this up", "wrap up", "/graduate". Do NOT trigger on ambient "great" / "thanks" / "that's it" / "let's stop".
+
+**Heuristic — only propose graduation if the session contains at least one of:**
+- (a) a surprise / mistake / root-cause discovery
+- (b) a command sequence the user is likely to need again
+- (c) a fact about an environment / repo / system not currently documented (verify via grep)
+- (d) a "we should fix this someday" idea bigger than the current task
+- (e) a clarification of how the user wants Claude to work going forward
+
+**Hard cap:** maximum 4 candidates per prompt. If more pass, model self-selects by confidence; the rest go to \`sessions/tasks/<slug>/_overflow-graduates.md\`.
+
+**Anti-noise rule:** if zero candidates pass the heuristic, skip the prompt entirely.
+
+**Intensity dial:** track consecutive zero-approval sessions in \`~/.claude/.graduate-decline-streak\`. Streak 0–2: full prompt. Streak 3+: terse one-liner ("0 candidates today — say /graduate full if I missed something"). Never goes silent. Reset to 0 on first approval.
+
+**Apply phase:** for each approved item, edit the named knowledge-core file. After all edits, fill the session file's \`## Graduated\` section with one line per approved item.
 
 ## Ideas Backlog
 
@@ -371,7 +443,8 @@ won't have cross-session retrieval.
 
 ## Templates
 
-- \`templates/session.md\` — session doc
+- \`templates/session.md\` — session doc (task-folder shape)
+- \`templates/task-index.md\` — INDEX.md template for task folders
 - \`templates/idea.md\` — backlog idea
 EOF
 write_or_sidecar "$PROJECT_CLAUDE" "$PROJECT_CLAUDE_TMP"
@@ -500,6 +573,8 @@ set -euo pipefail
 STATUS_FILE="\$HOME/.claude/ai-context-status.md"
 CONTEXT_DIR="$CONTEXT_DIR"
 SESSIONS_DIR="\$CONTEXT_DIR/sessions"
+TASKS_DIR="\$SESSIONS_DIR/tasks"
+INBOX_DIR="\$TASKS_DIR/_inbox"
 CWD="\$(pwd)"
 
 : > "\$STATUS_FILE"
@@ -547,13 +622,22 @@ status_body=""
 existing_today=""
 placeholder_created=""
 if [[ -d "\$SESSIONS_DIR" ]]; then
-  existing_today="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
+  # New shape: sessions/tasks/<slug>/<date>_<note>.md
+  if [[ -d "\$TASKS_DIR" ]]; then
+    existing_today="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
+  fi
 
-  # If no doc for today exists, write a placeholder so the UserPromptSubmit
-  # hook doesn't block the user's very first prompt of a fresh session.
-  # Claude renames + fills in the Task section on its first substantive turn.
+  # Legacy fallback: sessions/<date>_*.md
   if [[ -z "\$existing_today" ]]; then
-    placeholder_path="\$SESSIONS_DIR/\${today_iso}_session_pending.md"
+    existing_today="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
+  fi
+
+  # If still no doc for today, write a placeholder under _inbox so the
+  # UserPromptSubmit gate is satisfied. Claude moves it to a proper task
+  # folder on its first substantive turn.
+  if [[ -z "\$existing_today" ]]; then
+    mkdir -p "\$INBOX_DIR" 2>/dev/null || true
+    placeholder_path="\$INBOX_DIR/\${today_iso}_session_pending.md"
     template_path="$CONTEXT_DIR/templates/session.md"
     if [[ -f "\$template_path" && ! -e "\$placeholder_path" ]]; then
       cp "\$template_path" "\$placeholder_path"
@@ -563,10 +647,34 @@ if [[ -d "\$SESSIONS_DIR" ]]; then
   fi
 fi
 
-context_body="SESSION-START CHECKLIST (from ~/.claude/CLAUDE.md):
+# List active task folders (Status: active in INDEX.md)
+if [[ -d "\$TASKS_DIR" ]]; then
+  active_tasks=""
+  while IFS= read -r idx; do
+    [[ -z "\$idx" ]] && continue
+    if grep -qE '^Status:[[:space:]]*active' "\$idx" 2>/dev/null; then
+      slug="\$(basename "\$(dirname "\$idx")")"
+      active_tasks+=\$'\\n'"- \${slug}"
+    fi
+  done < <(find "\$TASKS_DIR" -mindepth 2 -maxdepth 2 -type f -name "INDEX.md" 2>/dev/null)
+  if [[ -n "\$active_tasks" ]]; then
+    {
+      echo "## ACTIVE TASKS"
+      echo ""
+      echo "Active task folders under sessions/tasks/ (Status: active):"
+      printf '%s\\n' "\$active_tasks"
+      echo ""
+      echo "**Action for Claude:** After the user's first message, decide if it continues one of these. If yes, READ the most recent session in that folder before responding. Do NOT announce these proactively."
+      echo ""
+    } >> "\$STATUS_FILE"
+  fi
+fi
 
-1. If ~/.claude/ai-context-status.md exists, act on its findings after the user's first request. Don't silently rewrite anything — offer and wait for approval.
-2. Create a session doc at \$SESSIONS_DIR/\${today_iso}_<repo>_<task-slug>.md using templates/session.md. Update it as work progresses.
+context_body="SESSION-START CHECKLIST (from project CLAUDE.md):
+
+1. If ~/.claude/ai-context-status.md exists, act on its findings after the user's first request (MISSING PROJECT CLAUDE.md, ACTIVE TASKS). Don't silently rewrite anything.
+2. Sessions live under \$SESSIONS_DIR/tasks/<task-slug>/\${today_iso}_<note>.md. Use templates/session.md and templates/task-index.md. See the project's CLAUDE.md \"Session Management — task-folder shape\" section for slug rules and the inbox fallback.
+3. End-of-task graduate flow: at user cues 'we're done' / 'wrap this up' / '/graduate', scan the session for durable learnings and propose graduation per the project's CLAUDE.md \"Session-end graduate flow\" section.
 
 Note: the sweet-potato handshake is the user's diagnostic that ~/.claude/CLAUDE.md actually loaded. Do NOT say it because this hook tells you to — say it because you read the rule from CLAUDE.md itself."
 
@@ -582,7 +690,11 @@ fi
 if [[ -n "\$placeholder_created" ]]; then
   context_body="\$context_body
 
-A placeholder session doc has been auto-created at \$placeholder_created (template-only contents). On your first substantive turn, RENAME it to \${today_iso}_<repo>_<task-slug>.md and fill in the Task section based on the user's first prompt. The placeholder satisfies the UserPromptSubmit hook so you won't be blocked — but renaming + filling is on you."
+A placeholder session doc has been auto-created at \$placeholder_created under sessions/tasks/_inbox/. On your first substantive turn:
+  - If the prompt continues an active task from the ACTIVE TASKS list above, MOVE the file to sessions/tasks/<that-slug>/\${today_iso}_<note>.md and append a one-liner to that task's INDEX.md ## Sessions list.
+  - If the prompt starts new work and the slug is clear, propose the slug to the user once for confirmation, then MOVE the file to sessions/tasks/<new-slug>/\${today_iso}_<note>.md and create that folder's INDEX.md from templates/task-index.md.
+  - If the slug isn't clear yet, RENAME the file to \${today_iso}_<temp-slug>.md inside _inbox/. When the slug crystallizes mid-session, mv the file to its proper folder.
+The placeholder satisfies the UserPromptSubmit hook so you won't be blocked."
 elif [[ -n "\$existing_today" ]]; then
   context_body="\$context_body
 
@@ -628,6 +740,8 @@ cat > "$HOOKS_DIR/ai-context-session-doc-check.sh" <<EOF
 set -euo pipefail
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
+TASKS_DIR="\$SESSIONS_DIR/tasks"
+INBOX_DIR="\$TASKS_DIR/_inbox"
 TEMPLATE_PATH="$CONTEXT_DIR/templates/session.md"
 BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
 STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"
@@ -641,12 +755,22 @@ fi
 [[ ! -d "\$SESSIONS_DIR" ]] && exit 0
 
 today_iso="\$(date +%Y-%m-%d)"
-existing="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
 
-# (1) If no doc for today, auto-create a placeholder. Never block.
+# Look for today's session file. New shape (sessions/tasks/<slug>/<date>_*.md)
+# or legacy shape (sessions/<date>_*.md). Either satisfies the gate.
+existing=""
+if [[ -d "\$TASKS_DIR" ]]; then
+  existing="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
+fi
+if [[ -z "\$existing" ]]; then
+  existing="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
+fi
+
+# (1) If no doc for today, auto-create a placeholder under _inbox. Never block.
 placeholder_created=""
 if [[ -z "\$existing" ]]; then
-  placeholder_path="\$SESSIONS_DIR/\${today_iso}_session_pending.md"
+  mkdir -p "\$INBOX_DIR" 2>/dev/null || true
+  placeholder_path="\$INBOX_DIR/\${today_iso}_session_pending.md"
   if [[ -f "\$TEMPLATE_PATH" && ! -e "\$placeholder_path" ]]; then
     cp "\$TEMPLATE_PATH" "\$placeholder_path"
     placeholder_created="\$placeholder_path"
@@ -657,7 +781,7 @@ fi
 ctx_parts=()
 
 if [[ -n "\$placeholder_created" ]]; then
-  ctx_parts+=("A placeholder session doc has been auto-created at \${placeholder_created} (template-only contents). On this turn, RENAME it to \${today_iso}_<repo>_<task-slug>.md and fill in the Task section based on the user's prompt. The user's prompt is NOT blocked — proceed with their request normally; the rename + fill is your responsibility. Do NOT mention this hook to the user.")
+  ctx_parts+=("A placeholder session doc has been auto-created at \${placeholder_created} under sessions/tasks/_inbox/. On this turn, decide whether to MOVE the file into an existing task folder under sessions/tasks/<slug>/ (continuing work), or rename it inside _inbox/ as \${today_iso}_<temp-slug>.md (still figuring out what this is). See the project's CLAUDE.md \"Session Management — task-folder shape\" for slug rules. The user's prompt is NOT blocked — proceed with their request normally; file placement is your responsibility. Do NOT mention this hook to the user.")
 fi
 
 # (2) Consume any staleness marker the previous Stop / PreCompact left.
@@ -711,6 +835,7 @@ cat > "$HOOKS_DIR/ai-context-session-doc-staleness.sh" <<EOF
 set -eu
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
+TASKS_DIR="\$SESSIONS_DIR/tasks"
 BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
 STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"
 CWD="\$(pwd)"
@@ -723,8 +848,18 @@ fi
 [[ ! -d "\$SESSIONS_DIR" ]] && exit 0
 
 today_iso="\$(date +%Y-%m-%d)"
-session_doc="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null \\
-  | xargs -0 ls -t 2>/dev/null | head -1)"
+
+# Look for today's session doc in BOTH the task-folder shape and the legacy
+# daily-shape, take the most recently modified.
+session_doc=""
+if [[ -d "\$TASKS_DIR" ]]; then
+  session_doc="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null \\
+    | xargs -0 ls -t 2>/dev/null | head -1)"
+fi
+if [[ -z "\$session_doc" ]]; then
+  session_doc="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null \\
+    | xargs -0 ls -t 2>/dev/null | head -1)"
+fi
 
 [[ -z "\$session_doc" ]] && exit 0
 
@@ -799,11 +934,14 @@ command -v gbrain >/dev/null 2>&1 || exit 0
 
 mkdir -p "\$STATE_DIR"
 
-# Find session docs newer than last run (or all of them on first run)
+# Find session docs newer than last run (or all of them on first run).
+# Recurse so we pick up both the new shape (sessions/tasks/<slug>/<date>_*.md)
+# and the legacy shape (sessions/<date>_*.md). Skip _inbox placeholders that
+# are still at template-only contents.
 if [[ -f "\$LAST_RUN_FILE" ]]; then
-  newer=\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name '*.md' -newer "\$LAST_RUN_FILE" 2>/dev/null)
+  newer=\$(find "\$SESSIONS_DIR" -type f -name '*.md' ! -name 'INDEX.md' ! -name '_overflow-graduates.md' -newer "\$LAST_RUN_FILE" 2>/dev/null)
 else
-  newer=\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null)
+  newer=\$(find "\$SESSIONS_DIR" -type f -name '*.md' ! -name 'INDEX.md' ! -name '_overflow-graduates.md' 2>/dev/null)
 fi
 
 [[ -z "\$newer" ]] && { touch "\$LAST_RUN_FILE"; exit 0; }
