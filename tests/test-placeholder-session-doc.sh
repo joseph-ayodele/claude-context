@@ -30,7 +30,7 @@ PLACEHOLDER="$INBOX/${TODAY}_session_pending.md"
 assert_no_file "no doc for today before SessionStart" "$PLACEHOLDER"
 
 # Trigger SessionStart
-hook_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null)
+hook_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-check.sh" </dev/null)
 
 # Placeholder should now exist under _inbox/
 assert_file "placeholder created on fresh session" "$PLACEHOLDER"
@@ -45,7 +45,7 @@ assert_contains "context references the inbox placeholder" "_inbox" "$ctx"
 assert_contains "context names the placeholder" "${TODAY}_session_pending.md" "$ctx"
 
 # UserPromptSubmit should now be silent (placeholder satisfies its check)
-ups_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-session-doc-check.sh" <<<'{}' || true)
+ups_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-session-doc-check.sh" <<<'{}' || true)
 assert_eq "UserPromptSubmit silent when placeholder exists" "" "$ups_out"
 
 # Re-running SessionStart must NOT create a second placeholder when one exists.
@@ -60,7 +60,7 @@ file_mtime() {
 }
 mtime_before=$(file_mtime "$PLACEHOLDER")
 sleep 1
-HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null >/dev/null
+HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-check.sh" </dev/null >/dev/null
 mtime_after=$(file_mtime "$PLACEHOLDER")
 assert_eq "placeholder not overwritten on re-run" "$mtime_before" "$mtime_after"
 
@@ -70,7 +70,7 @@ TASK_FOLDER="$TASKS/my-real-task"
 mkdir -p "$TASK_FOLDER"
 REAL_DOC="$TASK_FOLDER/${TODAY}_implementation.md"
 cp "$SANDBOX/ai-context/templates/session.md" "$REAL_DOC"
-HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null >/dev/null
+HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-check.sh" </dev/null >/dev/null
 assert_no_file "placeholder skipped when a real task-folder doc exists" "$PLACEHOLDER"
 assert_file "real task-folder doc still in place" "$REAL_DOC"
 rm -rf "$TASK_FOLDER"
@@ -78,7 +78,7 @@ rm -rf "$TASK_FOLDER"
 # Legacy doc shape also satisfies the gate (back-compat for the 34 historical files)
 LEGACY_DOC="$SESSIONS/${TODAY}_legacy_my-task.md"
 cp "$SANDBOX/ai-context/templates/session.md" "$LEGACY_DOC"
-HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null >/dev/null
+HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-check.sh" </dev/null >/dev/null
 assert_no_file "placeholder skipped when a legacy daily-shape doc exists" "$PLACEHOLDER"
 assert_file "legacy doc still in place" "$LEGACY_DOC"
 rm -f "$LEGACY_DOC"
@@ -89,7 +89,7 @@ rm -f "$LEGACY_DOC"
 # UserPromptSubmit must auto-create the placeholder + inject context, NOT block.
 assert_no_file "clean slate for rollover test" "$PLACEHOLDER"
 
-ups_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-session-doc-check.sh" <<<'{}')
+ups_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-session-doc-check.sh" <<<'{}')
 ups_exit=$?
 assert_eq "UserPromptSubmit exits 0 (not blocking)" "0" "$ups_exit"
 assert_file "UserPromptSubmit auto-creates placeholder on rollover" "$PLACEHOLDER"
@@ -102,7 +102,7 @@ ups_ctx=$(echo "$ups_out" | jq -r '.hookSpecificOutput.additionalContext // ""')
 assert_contains "UserPromptSubmit context references _inbox" "_inbox" "$ups_ctx"
 
 # Second UserPromptSubmit on the same turn — placeholder now exists, silent
-ups_out2=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-session-doc-check.sh" <<<'{}')
+ups_out2=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-session-doc-check.sh" <<<'{}')
 assert_eq "UserPromptSubmit silent on re-run with placeholder present" "" "$ups_out2"
 
 finish

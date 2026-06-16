@@ -20,7 +20,7 @@ TODAY=$(date +%Y-%m-%d)
 echo "# test session" > "$SANDBOX/ai-context/sessions/${TODAY}_test.md"
 
 # Run the hook with sandboxed HOME — no ~/.gbrain/config.json, must silently skip
-out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-gbrain-sync.sh" 2>&1)
+out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-gbrain-sync.sh" 2>&1)
 rc=$?
 
 assert_eq "gbrain hook exits 0 with no config" "0" "$rc"
@@ -28,6 +28,6 @@ assert_eq "gbrain hook produces no output when skipping" "" "$out"
 
 # State dir is NOT created when the hook hard-skips at the config check
 # (the mkdir comes after the config probe)
-assert_no_file "state dir not created on skip" "$SANDBOX/.claude/ai-context-state"
+assert_no_file "state dir not created on skip" "$SANDBOX/.claude/claude-context-state"
 
 finish

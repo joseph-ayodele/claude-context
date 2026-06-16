@@ -3,7 +3,7 @@
 #
 # Flow under test:
 #   1. PreCompact / transcript-size / idle signal at Stop → per-session
-#      marker written silently at ~/.claude/ai-context-stale-marker-<session_id>.
+#      marker written silently at ~/.claude/claude-context-stale-marker-<session_id>.
 #   2. UserPromptSubmit reads the marker for ITS session_id and injects a
 #      SOFT NUDGE (no specific files prescribed). Marker is consumed.
 #   3. A different session_id does NOT see the marker (per-session keying).
@@ -30,9 +30,9 @@ SESSION_ID="test-$$-$(date +%s)"
 DOC="$TASKS/my-task/${TODAY}_implementation.md"
 mkdir -p "$TASKS/my-task"
 cp "$SANDBOX/ai-context/templates/session.md" "$DOC"
-MARKER="$SANDBOX/.claude/ai-context-stale-marker-${SESSION_ID}"
-STALE_HOOK="$SANDBOX/.claude/hooks/ai-context-session-doc-staleness.sh"
-UPS_HOOK="$SANDBOX/.claude/hooks/ai-context-session-doc-check.sh"
+MARKER="$SANDBOX/.claude/claude-context-stale-marker-${SESSION_ID}"
+STALE_HOOK="$SANDBOX/.claude/hooks/claude-context-session-doc-staleness.sh"
+UPS_HOOK="$SANDBOX/.claude/hooks/claude-context-session-doc-check.sh"
 
 # Set up working dir under ~/code so the cwd guard passes
 mkdir -p "$SANDBOX/code/proj"
@@ -82,8 +82,8 @@ assert_eq "second UserPromptSubmit silent (marker gone)" "" "$ups_out2"
 # Step 4: Per-session keying — sessionA's marker is not consumed by sessionB.
 SESSION_A="sessA-$$"
 SESSION_B="sessB-$$"
-MARKER_A="$SANDBOX/.claude/ai-context-stale-marker-${SESSION_A}"
-MARKER_B="$SANDBOX/.claude/ai-context-stale-marker-${SESSION_B}"
+MARKER_A="$SANDBOX/.claude/claude-context-stale-marker-${SESSION_A}"
+MARKER_B="$SANDBOX/.claude/claude-context-stale-marker-${SESSION_B}"
 input_a=$(jq -n --arg sid "$SESSION_A" --arg tp "$TRANSCRIPT" \
   '{hook_event_name: "PreCompact", session_id: $sid, transcript_path: $tp}')
 out=$(cd "$SANDBOX/code/proj" && HOME="$SANDBOX" bash "$STALE_HOOK" <<<"$input_a")
@@ -109,6 +109,6 @@ input_no_sid=$(jq -n '{hook_event_name: "Stop"}')
 out=$(cd "$SANDBOX/code/proj" && HOME="$SANDBOX" bash "$STALE_HOOK" <<<"$input_no_sid")
 assert_eq "no-session_id Stop hook is silent" "" "$out"
 # No global stale-marker (legacy file) should have been written either
-assert_no_file "no global stale-marker created" "$SANDBOX/.claude/ai-context-stale-marker"
+assert_no_file "no global stale-marker created" "$SANDBOX/.claude/claude-context-stale-marker"
 
 finish

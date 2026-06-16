@@ -22,7 +22,7 @@ if [[ -d "$SANDBOX/ai-context/sessions" ]]; then _pass "sessions/ dir"; else _fa
 if [[ -d "$SANDBOX/ai-context/ideas" ]];    then _pass "ideas/ dir";    else _fail "ideas/ dir"    "exists" "missing"; fi
 
 # Hooks
-for hook in ai-context-check ai-context-session-doc-check ai-context-session-doc-staleness ai-context-gbrain-sync; do
+for hook in claude-context-check claude-context-session-doc-check claude-context-session-doc-staleness claude-context-gbrain-sync; do
   assert_file "hook: $hook" "$SANDBOX/.claude/hooks/$hook.sh"
   if [[ -x "$SANDBOX/.claude/hooks/$hook.sh" ]]; then
     _pass "hook executable: $hook"
@@ -49,7 +49,7 @@ content="$(cat "$SANDBOX/.claude/CLAUDE.md")"
 assert_contains "global has handshake" "sweet potato" "$content"
 
 # SessionStart hook produces valid JSON with the checklist
-hook_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null)
+hook_out=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-check.sh" </dev/null)
 ctx=$(echo "$hook_out" | jq -r '.hookSpecificOutput.additionalContext')
 # The handshake must NOT be in the hook payload — it's a CLAUDE.md-only
 # diagnostic, and saying it should imply the rules loaded, not that the

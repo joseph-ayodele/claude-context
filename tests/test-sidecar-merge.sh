@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # When CLAUDE.md files already exist with custom content, setup must:
 #   - leave the existing files untouched
-#   - write its proposed content to .ai-context-proposed sidecars
+#   - write its proposed content to .claude-context-proposed sidecars
 #   - have the SessionStart hook surface a merge prompt naming both sidecars
 
 # shellcheck source=tests/lib.sh
@@ -28,16 +28,16 @@ assert_eq "project CLAUDE.md preserved" "$custom_proj" "$(cat "$SANDBOX/ai-conte
 assert_eq "global CLAUDE.md preserved"  "$custom_global" "$(cat "$SANDBOX/.claude/CLAUDE.md")"
 
 # Sidecars created
-assert_file "project sidecar"           "$SANDBOX/ai-context/CLAUDE.md.ai-context-proposed"
-assert_file "global sidecar"            "$SANDBOX/.claude/CLAUDE.md.ai-context-proposed"
+assert_file "project sidecar"           "$SANDBOX/ai-context/CLAUDE.md.claude-context-proposed"
+assert_file "global sidecar"            "$SANDBOX/.claude/CLAUDE.md.claude-context-proposed"
 
 # SessionStart hook surfaces both sidecars in additionalContext
-ctx=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/ai-context-check.sh" </dev/null \
+ctx=$(HOME="$SANDBOX" bash "$SANDBOX/.claude/hooks/claude-context-check.sh" </dev/null \
   | jq -r '.hookSpecificOutput.additionalContext')
 
 assert_contains "hook mentions PENDING MERGE"             "PENDING MERGE" "$ctx"
-assert_contains "hook references project sidecar path"    "ai-context/CLAUDE.md.ai-context-proposed" "$ctx"
-assert_contains "hook references global sidecar path"     ".claude/CLAUDE.md.ai-context-proposed" "$ctx"
+assert_contains "hook references project sidecar path"    "ai-context/CLAUDE.md.claude-context-proposed" "$ctx"
+assert_contains "hook references global sidecar path"     ".claude/CLAUDE.md.claude-context-proposed" "$ctx"
 assert_contains "hook tells Claude to read both files"    "Read both" "$ctx"
 
 # Re-running setup is safe: the user's existing files stay untouched.

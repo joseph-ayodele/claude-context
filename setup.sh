@@ -67,7 +67,7 @@ err()   { printf '%s ✗%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2; }
 #
 # If TARGET doesn't exist: move TMPFILE into place.
 # If TARGET exists and is identical to TMPFILE: drop TMPFILE silently (no-op).
-# If TARGET exists and differs: move TMPFILE to TARGET.ai-context-proposed
+# If TARGET exists and differs: move TMPFILE to TARGET.claude-context-proposed
 #   so the SessionStart hook can surface a merge prompt to Claude.
 #
 # This is how "smart integration with existing context" lands without setup
@@ -82,7 +82,7 @@ write_or_sidecar() {
     rm -f "$tmp"
     ok "$target already up to date — left as is"
   else
-    local sidecar="$target.ai-context-proposed"
+    local sidecar="$target.claude-context-proposed"
     mv "$tmp" "$sidecar"
     warn "$target already exists with different content"
     say  "  Wrote proposed version to $sidecar"
@@ -108,8 +108,13 @@ ask() {
 
 confirm() {
   # confirm "Question" -> 0 yes, 1 no
+  # Honors --yes for INSTALL flow, but uninstall data-deletion always asks.
+  # Rationale: --yes is "accept defaults" and the default for "delete user
+  # data" is NO. A user running `setup.sh --uninstall --yes` to skip the
+  # interactive prompts about gbrain etc. shouldn't lose their session
+  # docs as a side effect.
   local q="$1" ans
-  if [[ $ASSUME_YES -eq 1 ]]; then return 0; fi
+  if [[ $ASSUME_YES -eq 1 && $UNINSTALL -eq 0 ]]; then return 0; fi
   read -r -p "$q [y/N]: " ans
   [[ "$ans" =~ ^[Yy] ]]
 }
@@ -151,7 +156,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
     BACKUP="$SETTINGS.bak.$(date +%s)"
     cp "$SETTINGS" "$BACKUP"
     TMP="$(mktemp)"
-    jq --arg prefix "bash $HOOKS_DIR/ai-context-" '
+    jq --arg prefix "bash $HOOKS_DIR/claude-context-" '
       if .hooks then
         .hooks |= with_entries(
           .value |= map(
@@ -165,14 +170,14 @@ if [[ $UNINSTALL -eq 1 ]]; then
 
   # Remove the hook scripts
   if [[ -d "$HOOKS_DIR" ]]; then
-    rm -f "$HOOKS_DIR"/ai-context-*.sh
+    rm -f "$HOOKS_DIR"/claude-context-*.sh
     ok "Removed hook scripts from $HOOKS_DIR"
   fi
 
   # Remove our state dir (gbrain-last-run, gbrain-errors.log, etc.)
-  if [[ -d "$HOME/.claude/ai-context-state" ]]; then
-    rm -rf "$HOME/.claude/ai-context-state"
-    ok "Removed $HOME/.claude/ai-context-state"
+  if [[ -d "$HOME/.claude/claude-context-state" ]]; then
+    rm -rf "$HOME/.claude/claude-context-state"
+    ok "Removed $HOME/.claude/claude-context-state"
   fi
 
   # Remove the alias from common rc files. We match the marker comment we
@@ -214,8 +219,17 @@ if [[ $UNINSTALL -eq 1 ]]; then
   fi
 
   # Sidecars — clean up if any are still pending
-  rm -f "$HOME/.claude/CLAUDE.md.ai-context-proposed" 2>/dev/null
-  rm -f "$DEFAULT_CONTEXT_DIR/CLAUDE.md.ai-context-proposed" 2>/dev/null
+  rm -f "$HOME/.claude/CLAUDE.md.claude-context-proposed" 2>/dev/null
+  rm -f "$DEFAULT_CONTEXT_DIR/CLAUDE.md.claude-context-proposed" 2>/dev/null
+
+  # Runtime files written by the hooks themselves. These accumulate during
+  # use, so an uninstall that leaves them behind isn't fully clean.
+  rm -f "$HOME/.claude/claude-context-status.md"
+  rm -f "$HOME/.claude/claude-context-stale-marker"          # legacy global marker
+  rm -f "$HOME/.claude/claude-context-stale-marker-"*        # per-session markers
+  rm -f "$HOME/.claude/claude-context-bypass"                # one-shot bypass
+  rm -f "$HOME/.claude/.graduate-decline-streak"             # graduate-flow counter
+  ok "Removed runtime files (status, markers, bypass, decline-streak)"
 
   printf '\n%sUninstall complete.%s\n' "$C_BOLD" "$C_RESET"
   exit 0
@@ -537,11 +551,11 @@ re-validate. Don't make changes irrelevant to the assigned task.
 
 ## Session-start checks (auto-generated)
 
-The `SessionStart` hook (`~/.claude/hooks/ai-context-check.sh`) runs at the
-start of every session. It writes `~/.claude/ai-context-status.md` if anything
+The `SessionStart` hook (`~/.claude/hooks/claude-context-check.sh`) runs at the
+start of every session. It writes `~/.claude/claude-context-status.md` if anything
 needs user attention.
 
-At the start of every session, check if `~/.claude/ai-context-status.md`
+At the start of every session, check if `~/.claude/claude-context-status.md`
 exists. If it does, read it and act on its findings. If it doesn't, nothing
 needs attention — proceed normally.
 
@@ -562,21 +576,27 @@ info "Writing hook scripts"
 HOOKS_DIR="$HOME/.claude/hooks"
 
 # 6a. SessionStart: inject checklist + flag missing project CLAUDE.md
-cat > "$HOOKS_DIR/ai-context-check.sh" <<EOF
+cat > "$HOOKS_DIR/claude-context-check.sh" <<EOF
 #!/usr/bin/env bash
-# ai-context-check.sh
+# claude-context-check.sh
 # SessionStart hook. Two jobs:
 #   1. Detect missing project CLAUDE.md (write a status file Claude reads)
 #   2. Inject session-start checklist into Claude's context
 
 set -euo pipefail
 
-STATUS_FILE="\$HOME/.claude/ai-context-status.md"
+STATUS_FILE="\$HOME/.claude/claude-context-status.md"
 CONTEXT_DIR="$CONTEXT_DIR"
 SESSIONS_DIR="\$CONTEXT_DIR/sessions"
 TASKS_DIR="\$SESSIONS_DIR/tasks"
 INBOX_DIR="\$TASKS_DIR/_inbox"
-CWD="\$(pwd)"
+
+# Prefer the cwd Claude Code passes in via JSON (correct under Conductor /
+# IDE invocations where the hook process cwd may differ from the
+# conversation cwd). Fall back to pwd if no JSON or no cwd field.
+INPUT_JSON="\$(cat 2>/dev/null || true)"
+CWD="\$(printf '%s' "\$INPUT_JSON" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
+[[ -z "\$CWD" ]] && CWD="\$(pwd)"
 
 : > "\$STATUS_FILE"
 
@@ -603,12 +623,12 @@ if [[ "\$CWD" != "\$CONTEXT_DIR"* ]]; then
   fi
 fi
 
-# Detect .ai-context-proposed sidecars left by setup when CLAUDE.md files
+# Detect .claude-context-proposed sidecars left by setup when CLAUDE.md files
 # already existed. If any are found, ask Claude (in-conversation) to merge
 # them with the existing files. Setup never touches existing files itself —
 # this is the seam where claude does the merge.
 sidecars=""
-for candidate in "\$CONTEXT_DIR/CLAUDE.md.ai-context-proposed" "\$HOME/.claude/CLAUDE.md.ai-context-proposed"; do
+for candidate in "\$CONTEXT_DIR/CLAUDE.md.claude-context-proposed" "\$HOME/.claude/CLAUDE.md.claude-context-proposed"; do
   [[ -f "\$candidate" ]] && sidecars="\${sidecars}\${candidate}\\n"
 done
 
@@ -640,40 +660,93 @@ if [[ -d "\$SESSIONS_DIR" ]]; then
     mkdir -p "\$INBOX_DIR" 2>/dev/null || true
     placeholder_path="\$INBOX_DIR/\${today_iso}_session_pending.md"
     template_path="$CONTEXT_DIR/templates/session.md"
+    # cp -n: no-clobber. Closes the TOCTOU race where two parallel SessionStart
+    # hooks both pass the [! -e] test and both cp — second wins, first loses
+    # any partial edits. -n makes the second cp silently no-op.
     if [[ -f "\$template_path" && ! -e "\$placeholder_path" ]]; then
-      cp "\$template_path" "\$placeholder_path"
-      placeholder_created="\$placeholder_path"
+      if cp -n "\$template_path" "\$placeholder_path" 2>/dev/null; then
+        placeholder_created="\$placeholder_path"
+      fi
       existing_today="\$placeholder_path"
     fi
   fi
 fi
 
-# List active task folders (Status: active in INDEX.md)
+# List active task folders. Walk sessions/tasks/<slug>/INDEX.md, keep those
+# with Status: active, rank by most-recent session-file mtime, cap at 10.
+# Surface stale _inbox files (>30 days) in the same status block so they
+# don't accumulate forever.
 if [[ -d "\$TASKS_DIR" ]]; then
-  active_tasks=""
-  while IFS= read -r idx; do
-    [[ -z "\$idx" ]] && continue
-    if grep -qE '^Status:[[:space:]]*active' "\$idx" 2>/dev/null; then
-      slug="\$(basename "\$(dirname "\$idx")")"
-      active_tasks+=\$'\\n'"- \${slug}"
+  index_files="\$(find "\$TASKS_DIR" -mindepth 2 -maxdepth 2 -type f -name "INDEX.md" 2>/dev/null)"
+
+  if [[ -n "\$index_files" ]]; then
+    entries=""
+    while IFS= read -r idx; do
+      [[ -z "\$idx" ]] && continue
+      grep -qE '^Status:[[:space:]]*active' "\$idx" 2>/dev/null || continue
+
+      folder="\$(dirname "\$idx")"
+      slug="\$(basename "\$folder")"
+
+      # Newest dated session file in the folder (skip INDEX.md and overflow files).
+      newest_session="\$(find "\$folder" -maxdepth 1 -type f -name "[0-9]*.md" 2>/dev/null | sort -r | head -1)"
+
+      if [[ -n "\$newest_session" ]]; then
+        if [[ "\$(uname)" == "Darwin" ]]; then
+          newest_mtime="\$(stat -f %m "\$newest_session" 2>/dev/null || echo 0)"
+        else
+          newest_mtime="\$(stat -c %Y "\$newest_session" 2>/dev/null || echo 0)"
+        fi
+      else
+        newest_mtime=0
+        newest_session="(no session files yet)"
+      fi
+
+      jira="\$(awk -F: '/^JIRA:/ { sub(/^[[:space:]]*/, "", \$2); print \$2; exit }' "\$idx" 2>/dev/null | sed 's/^[ \\t]*//;s/[ \\t]*\$//')"
+
+      line="- \${slug}"
+      if [[ -n "\$jira" && "\$jira" != "(none)" ]]; then
+        line="\${line} (JIRA: \${jira})"
+      fi
+      line="\${line} — last session: \${newest_session#\$SESSIONS_DIR/}"
+      entries+=\$'\\n'"\${newest_mtime}"\$'\\t'"\${line}"
+    done <<< "\$index_files"
+
+    if [[ -n "\$entries" ]]; then
+      rendered="\$(printf '%s\\n' "\$entries" | sed '/^\$/d' | sort -t\$'\\t' -k1,1 -nr | head -10 | cut -f2-)"
+
+      stale_inbox=""
+      if [[ -d "\$INBOX_DIR" ]]; then
+        stale_inbox="\$(find "\$INBOX_DIR" -maxdepth 1 -type f -name "*.md" -mtime +30 2>/dev/null | sed "s|\$SESSIONS_DIR/||" | head -5)"
+      fi
+
+      {
+        echo "## ACTIVE TASKS"
+        echo ""
+        echo "Task folders under \\\`sessions/tasks/\\\` with \\\`Status: active\\\` in INDEX.md (top 10 by most-recent session):"
+        echo ""
+        printf '%s\\n' "\$rendered"
+        echo ""
+        echo "**Action for Claude:** After the user's first message, decide if it continues one of these (slug match, JIRA key match, same artifact). If yes, READ that task's most-recent session file BEFORE responding so you start with context. If no, a new task folder may need to be created. Do NOT announce these tasks to the user proactively."
+        echo ""
+        if [[ -n "\$stale_inbox" ]]; then
+          echo "### Stale inbox files (>30 days old)"
+          echo ""
+          echo "These files in \\\`sessions/tasks/_inbox/\\\` were never re-homed:"
+          echo ""
+          printf '%s\\n' "\$stale_inbox" | sed 's|^|- |'
+          echo ""
+          echo "**Action for Claude:** If a natural moment arises in conversation, propose to the user: 'Want me to re-home or archive these inbox files?'"
+          echo ""
+        fi
+      } >> "\$STATUS_FILE"
     fi
-  done < <(find "\$TASKS_DIR" -mindepth 2 -maxdepth 2 -type f -name "INDEX.md" 2>/dev/null)
-  if [[ -n "\$active_tasks" ]]; then
-    {
-      echo "## ACTIVE TASKS"
-      echo ""
-      echo "Active task folders under sessions/tasks/ (Status: active):"
-      printf '%s\\n' "\$active_tasks"
-      echo ""
-      echo "**Action for Claude:** After the user's first message, decide if it continues one of these. If yes, READ the most recent session in that folder before responding. Do NOT announce these proactively."
-      echo ""
-    } >> "\$STATUS_FILE"
   fi
 fi
 
 context_body="SESSION-START CHECKLIST (from project CLAUDE.md):
 
-1. If ~/.claude/ai-context-status.md exists, act on its findings after the user's first request (MISSING PROJECT CLAUDE.md, ACTIVE TASKS). Don't silently rewrite anything.
+1. If ~/.claude/claude-context-status.md exists, act on its findings after the user's first request (MISSING PROJECT CLAUDE.md, ACTIVE TASKS). Don't silently rewrite anything.
 2. Sessions live under \$SESSIONS_DIR/tasks/<task-slug>/\${today_iso}_<note>.md. Use templates/session.md and templates/task-index.md. See the project's CLAUDE.md \"Session Management — task-folder shape\" section for slug rules and the inbox fallback.
 3. End-of-task graduate flow: at user cues 'we're done' / 'wrap this up' / '/graduate', scan the session for durable learnings and propose graduation per the project's CLAUDE.md \"Session-end graduate flow\" section.
 
@@ -682,7 +755,7 @@ Note: the sweet-potato handshake is the user's diagnostic that ~/.claude/CLAUDE.
 if [[ -n "\$status_body" ]]; then
   context_body="\$context_body
 
-STATUS FILE CONTENTS (~/.claude/ai-context-status.md):
+STATUS FILE CONTENTS (~/.claude/claude-context-status.md):
 ---
 \$status_body
 ---"
@@ -709,7 +782,7 @@ if [[ -n "\$sidecars" ]]; then
 PENDING MERGE: ai-context setup found pre-existing CLAUDE.md files when it ran. It wrote the proposed new content as sidecar files instead of clobbering. The user wants Claude to integrate these intelligently:
 \$(printf '%b' "\$sidecars" | sed 's|^|  - |')
 For each sidecar above:
-  1. Read both the existing target file and the .ai-context-proposed sidecar.
+  1. Read both the existing target file and the .claude-context-proposed sidecar.
   2. Propose a merge in this conversation that preserves the user's existing content while adding the missing ai-context sections (session management, ideas backlog, retrieval guidance, role + handshake — whichever the proposed file adds that the existing one lacks).
   3. After the user approves, write the merged content to the target file with the Edit/Write tool, then delete the sidecar.
 Do this BEFORE other work so subsequent sessions don't re-trigger this prompt. Do NOT silently overwrite — show the user what you'll change."
@@ -724,8 +797,8 @@ jq -n --arg ctx "\$context_body" '{
 
 exit 0
 EOF
-chmod +x "$HOOKS_DIR/ai-context-check.sh"
-ok "Wrote $HOOKS_DIR/ai-context-check.sh"
+chmod +x "$HOOKS_DIR/claude-context-check.sh"
+ok "Wrote $HOOKS_DIR/claude-context-check.sh"
 
 # 6b. UserPromptSubmit: two responsibilities, both silent unless context
 #     needs to be injected. Never blocks the user's prompt.
@@ -733,9 +806,9 @@ ok "Wrote $HOOKS_DIR/ai-context-check.sh"
 #          sessions and sessions resumed across midnight).
 #       2. Consume any staleness marker left by the previous Stop or
 #          PreCompact, and inject a doc-update reminder for the current turn.
-cat > "$HOOKS_DIR/ai-context-session-doc-check.sh" <<EOF
+cat > "$HOOKS_DIR/claude-context-session-doc-check.sh" <<EOF
 #!/usr/bin/env bash
-# ai-context-session-doc-check.sh
+# claude-context-session-doc-check.sh
 # UserPromptSubmit hook. Always silent unless context needs to be injected.
 
 set -euo pipefail
@@ -744,8 +817,8 @@ SESSIONS_DIR="$CONTEXT_DIR/sessions"
 TASKS_DIR="\$SESSIONS_DIR/tasks"
 INBOX_DIR="\$TASKS_DIR/_inbox"
 TEMPLATE_PATH="$CONTEXT_DIR/templates/session.md"
-BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
-STALE_MARKER="\$HOME/.claude/ai-context-stale-marker"  # legacy global marker (cleaned up if present)
+BYPASS_FILE="\$HOME/.claude/claude-context-bypass"
+STALE_MARKER="\$HOME/.claude/claude-context-stale-marker"  # legacy global marker (cleaned up if present)
 
 # Read the hook event JSON from stdin once — UserPromptSubmit hooks receive
 # session_id, transcript_path, hook_event_name, etc. We use it for the
@@ -777,8 +850,11 @@ placeholder_created=""
 if [[ -z "\$existing" ]]; then
   mkdir -p "\$INBOX_DIR" 2>/dev/null || true
   placeholder_path="\$INBOX_DIR/\${today_iso}_session_pending.md"
+  # cp -n: no-clobber. Two parallel UserPromptSubmits could both pass the
+  # [! -e] test; -n makes only the first cp succeed, the second silently
+  # no-ops, preserving any partial fill the first session already started.
   if [[ -f "\$TEMPLATE_PATH" && ! -e "\$placeholder_path" ]]; then
-    cp "\$TEMPLATE_PATH" "\$placeholder_path"
+    cp -n "\$TEMPLATE_PATH" "\$placeholder_path" 2>/dev/null
     placeholder_created="\$placeholder_path"
   fi
 fi
@@ -797,7 +873,7 @@ fi
 # threads into the active doc — without prescribing specific files.
 session_id="\$(printf '%s' "\$INPUT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
 if [[ -n "\$session_id" ]]; then
-  PER_SESSION_MARKER="\$HOME/.claude/ai-context-stale-marker-\${session_id}"
+  PER_SESSION_MARKER="\$HOME/.claude/claude-context-stale-marker-\${session_id}"
   if [[ -f "\$PER_SESSION_MARKER" ]]; then
     marker_doc="\$(jq -r '.session_doc // ""' "\$PER_SESSION_MARKER" 2>/dev/null || echo "")"
     marker_reasons="\$(jq -r '.reasons | join(", ")' "\$PER_SESSION_MARKER" 2>/dev/null || echo "")"
@@ -828,17 +904,17 @@ fi
 
 exit 0
 EOF
-chmod +x "$HOOKS_DIR/ai-context-session-doc-check.sh"
-ok "Wrote $HOOKS_DIR/ai-context-session-doc-check.sh"
+chmod +x "$HOOKS_DIR/claude-context-session-doc-check.sh"
+ok "Wrote $HOOKS_DIR/claude-context-session-doc-check.sh"
 
 # 6c. Stop / PreCompact: write a staleness marker if today's doc is older
 #     than recent code edits. The marker is consumed by the next
 #     UserPromptSubmit, which injects the doc-update reminder into the
 #     NEXT turn's context — keeping the previous turn's response visible
 #     instead of forcing a noisy doc-update turn right after it.
-cat > "$HOOKS_DIR/ai-context-session-doc-staleness.sh" <<EOF
+cat > "$HOOKS_DIR/claude-context-session-doc-staleness.sh" <<EOF
 #!/usr/bin/env bash
-# ai-context-session-doc-staleness.sh
+# claude-context-session-doc-staleness.sh
 # Stop / PreCompact hook. Always silent. Writes a per-session "context-pressure"
 # marker when the conversation has accumulated enough state that the active
 # session doc should be brought up to date. Triggers (any one fires):
@@ -853,11 +929,10 @@ set -eu
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
 TASKS_DIR="\$SESSIONS_DIR/tasks"
-BYPASS_FILE="\$HOME/.claude/ai-context-bypass"
-CWD="\$(pwd)"
+BYPASS_FILE="\$HOME/.claude/claude-context-bypass"
 
-IDLE_SECONDS="\${AI_CONTEXT_IDLE_SECONDS:-5400}"
-THRESHOLD_BYTES="\${AI_CONTEXT_TRANSCRIPT_THRESHOLD:-1572864}"
+IDLE_SECONDS="\${CLAUDE_CONTEXT_IDLE_SECONDS:-5400}"
+THRESHOLD_BYTES="\${CLAUDE_CONTEXT_TRANSCRIPT_THRESHOLD:-1572864}"
 
 if [[ -f "\$BYPASS_FILE" ]]; then
   rm -f "\$BYPASS_FILE"
@@ -866,14 +941,18 @@ fi
 
 [[ ! -d "\$SESSIONS_DIR" ]] && exit 0
 
+# Read JSON once. Use the cwd from JSON (correct under Conductor / IDE
+# invocations); fall back to pwd if missing.
 input="\$(cat 2>/dev/null || true)"
 event="\$(printf '%s' "\$input" | jq -r '.hook_event_name // "Stop"' 2>/dev/null || echo "Stop")"
 session_id="\$(printf '%s' "\$input" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
 transcript_path="\$(printf '%s' "\$input" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")"
+CWD="\$(printf '%s' "\$input" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
+[[ -z "\$CWD" ]] && CWD="\$(pwd)"
 
 [[ -z "\$session_id" ]] && exit 0
 
-STALE_MARKER="\$HOME/.claude/ai-context-stale-marker-\${session_id}"
+STALE_MARKER="\$HOME/.claude/claude-context-stale-marker-\${session_id}"
 today_iso="\$(date +%Y-%m-%d)"
 
 # Find today's session doc in BOTH the task-folder shape and the legacy
@@ -935,15 +1014,15 @@ jq -n \\
 
 exit 0
 EOF
-chmod +x "$HOOKS_DIR/ai-context-session-doc-staleness.sh"
-ok "Wrote $HOOKS_DIR/ai-context-session-doc-staleness.sh"
+chmod +x "$HOOKS_DIR/claude-context-session-doc-staleness.sh"
+ok "Wrote $HOOKS_DIR/claude-context-session-doc-staleness.sh"
 
 # 6d. Stop: best-effort gbrain ingest of session docs.
 #     Self-detecting: silently skips if gbrain is missing or unhealthy.
 #     Tracks ingested files via a state dir to only push changed/new docs.
-cat > "$HOOKS_DIR/ai-context-gbrain-sync.sh" <<EOF
+cat > "$HOOKS_DIR/claude-context-gbrain-sync.sh" <<EOF
 #!/usr/bin/env bash
-# ai-context-gbrain-sync.sh
+# claude-context-gbrain-sync.sh
 # Stop hook. Best-effort: if gbrain is installed and initialized, push any
 # session docs that have changed since last run into gbrain as pages. If
 # gbrain is missing, exits silently. Never blocks.
@@ -951,7 +1030,7 @@ cat > "$HOOKS_DIR/ai-context-gbrain-sync.sh" <<EOF
 set -eu
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
-STATE_DIR="\$HOME/.claude/ai-context-state"
+STATE_DIR="\$HOME/.claude/claude-context-state"
 LAST_RUN_FILE="\$STATE_DIR/gbrain-last-run"
 ERROR_LOG="\$STATE_DIR/gbrain-errors.log"
 
@@ -978,12 +1057,16 @@ fi
 
 [[ -z "\$newer" ]] && { touch "\$LAST_RUN_FILE"; exit 0; }
 
-# Ingest each. Slug is the filename without .md. Errors go to ERROR_LOG so
-# the Stop hook never blocks but failures stay queryable. Tail the log:
-#   tail ~/.claude/ai-context-state/gbrain-errors.log
+# Ingest each. Slug encodes the path under sessions/ so two task folders with
+# the same dated filename (tasks/auth/2026-06-15.md vs tasks/migrate/2026-06-15.md)
+# don't collide in gbrain. Encoding: slashes → "__", trailing ".md" stripped.
+# Errors go to ERROR_LOG so the Stop hook never blocks but failures stay
+# queryable: tail ~/.claude/claude-context-state/gbrain-errors.log
 echo "\$newer" | while IFS= read -r doc; do
   [[ -z "\$doc" ]] && continue
-  slug="\$(basename "\$doc" .md)"
+  rel="\${doc#\$SESSIONS_DIR/}"
+  slug="\${rel%.md}"
+  slug="\${slug//\\//__}"
   if ! gbrain put "\$slug" --content "\$(cat "\$doc")" >/dev/null 2>>"\$ERROR_LOG"; then
     printf '[%s] gbrain put failed for %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$slug" >> "\$ERROR_LOG"
   fi
@@ -992,8 +1075,8 @@ done
 touch "\$LAST_RUN_FILE"
 exit 0
 EOF
-chmod +x "$HOOKS_DIR/ai-context-gbrain-sync.sh"
-ok "Wrote $HOOKS_DIR/ai-context-gbrain-sync.sh"
+chmod +x "$HOOKS_DIR/claude-context-gbrain-sync.sh"
+ok "Wrote $HOOKS_DIR/claude-context-gbrain-sync.sh"
 
 # -------------------------------------------------------------------
 # 7. Merge hook entries into ~/.claude/settings.json
@@ -1016,10 +1099,10 @@ ok "Backed up existing settings.json to $BACKUP"
 # printf '%q' produces a shell-quoted form so paths with spaces or other
 # special chars survive when Claude Code re-parses the command as shell.
 HOOK_PATCH="$(jq -n \
-  --arg sess "bash $(printf '%q' "$HOOKS_DIR/ai-context-check.sh")" \
-  --arg user "bash $(printf '%q' "$HOOKS_DIR/ai-context-session-doc-check.sh")" \
-  --arg stale "bash $(printf '%q' "$HOOKS_DIR/ai-context-session-doc-staleness.sh")" \
-  --arg gbrain "bash $(printf '%q' "$HOOKS_DIR/ai-context-gbrain-sync.sh")" \
+  --arg sess "bash $(printf '%q' "$HOOKS_DIR/claude-context-check.sh")" \
+  --arg user "bash $(printf '%q' "$HOOKS_DIR/claude-context-session-doc-check.sh")" \
+  --arg stale "bash $(printf '%q' "$HOOKS_DIR/claude-context-session-doc-staleness.sh")" \
+  --arg gbrain "bash $(printf '%q' "$HOOKS_DIR/claude-context-gbrain-sync.sh")" \
   '{
     SessionStart:      [{hooks: [{type:"command", command:$sess}]}],
     UserPromptSubmit:  [{hooks: [{type:"command", command:$user}]}],
@@ -1027,12 +1110,34 @@ HOOK_PATCH="$(jq -n \
     PreCompact:        [{hooks: [{type:"command", command:$stale}]}]
   }')"
 
-# Merge: existing settings win on top-level keys, but we replace .hooks with
-# our entries (idempotent — re-running the installer just rewrites these four).
+# Surgical merge: for each event key in $HOOK_PATCH (SessionStart,
+# UserPromptSubmit, Stop, PreCompact), take any pre-existing inner hooks
+# under that key, drop ones whose `command` belongs to us (matches the
+# uninstall filter), drop matchers that became empty, then append our new
+# entries. Event keys we don't touch are preserved untouched. Foreign tools
+# under SessionStart/Stop/etc. survive install + re-install + uninstall.
 TMP="$(mktemp)"
-jq --argjson patch "$HOOK_PATCH" '. + {hooks: ((.hooks // {}) + $patch)}' "$SETTINGS" > "$TMP"
+PREFIX="bash $HOOKS_DIR/claude-context-"
+jq \
+  --argjson patch "$HOOK_PATCH" \
+  --arg prefix "$PREFIX" \
+  '
+    .hooks //= {}
+    | .hooks = (
+        (.hooks // {}) as $existing
+        | reduce ($patch | to_entries[]) as $e ($existing;
+            .[$e.key] = (
+              (($existing[$e.key] // [])
+                | map(.hooks |= map(select(.command | startswith($prefix) | not)))
+                | map(select((.hooks // []) | length > 0))
+              )
+              + $e.value
+            )
+          )
+      )
+  ' "$SETTINGS" > "$TMP"
 mv "$TMP" "$SETTINGS"
-ok "Hook entries merged into $SETTINGS"
+ok "Hook entries merged into $SETTINGS (foreign hooks preserved)"
 
 # -------------------------------------------------------------------
 # 7.5. Detect gbrain — offer to install/init if missing
@@ -1055,7 +1160,7 @@ if [[ $SKIP_GBRAIN -eq 0 ]]; then
   info "Checking for gbrain (optional retrieval layer)"
 
   # Surface recent ingest errors so re-runs of setup act as a doctor command.
-  GBRAIN_ERROR_LOG="$HOME/.claude/ai-context-state/gbrain-errors.log"
+  GBRAIN_ERROR_LOG="$HOME/.claude/claude-context-state/gbrain-errors.log"
   if [[ -s "$GBRAIN_ERROR_LOG" ]]; then
     err_count=$(wc -l <"$GBRAIN_ERROR_LOG" | tr -d ' ')
     warn "$err_count recent gbrain ingest error(s) — see $GBRAIN_ERROR_LOG"
@@ -1118,7 +1223,7 @@ ${C_BOLD}Setup complete.${C_RESET}
 What was set up:
   ${C_DIM}context dir:${C_RESET}   $CONTEXT_DIR
   ${C_DIM}global rules:${C_RESET}  $GLOBAL_CLAUDE
-  ${C_DIM}hooks:${C_RESET}         $HOOKS_DIR/ai-context-*.sh (4 hooks)
+  ${C_DIM}hooks:${C_RESET}         $HOOKS_DIR/claude-context-*.sh (4 hooks)
   ${C_DIM}settings:${C_RESET}      $SETTINGS (backup at $BACKUP)
   ${C_DIM}alias:${C_RESET}         '$ALIAS_NAME' in $SHELL_RC
   ${C_DIM}gbrain:${C_RESET}        $(gbrain_status)
