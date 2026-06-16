@@ -851,14 +851,23 @@ today_iso="\$(date +%Y-%m-%d)"
 
 # Look for today's session doc in BOTH the task-folder shape and the legacy
 # daily-shape, take the most recently modified.
+#
+# IMPORTANT: GNU xargs runs the command even with empty stdin (BSD xargs
+# does not), which on Linux makes \`find ... | xargs ls -t | head -1\` return a
+# random file from CWD when find finds nothing. Pipe through a length check
+# (-z) before xargs to keep the behaviour identical across platforms.
 session_doc=""
 if [[ -d "\$TASKS_DIR" ]]; then
-  session_doc="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null \\
-    | xargs -0 ls -t 2>/dev/null | head -1)"
+  task_matches="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null)"
+  if [[ -n "\$task_matches" ]]; then
+    session_doc="\$(printf '%s' "\$task_matches" | xargs -0 ls -t 2>/dev/null | head -1)"
+  fi
 fi
 if [[ -z "\$session_doc" ]]; then
-  session_doc="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null \\
-    | xargs -0 ls -t 2>/dev/null | head -1)"
+  legacy_matches="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null)"
+  if [[ -n "\$legacy_matches" ]]; then
+    session_doc="\$(printf '%s' "\$legacy_matches" | xargs -0 ls -t 2>/dev/null | head -1)"
+  fi
 fi
 
 [[ -z "\$session_doc" ]] && exit 0
