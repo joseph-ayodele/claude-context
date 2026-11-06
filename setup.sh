@@ -748,9 +748,7 @@ context_body="SESSION-START CHECKLIST (from project CLAUDE.md):
 
 1. If ~/.claude/claude-context-status.md exists, act on its findings after the user's first request (MISSING PROJECT CLAUDE.md, ACTIVE TASKS). Don't silently rewrite anything.
 2. Sessions live under \$SESSIONS_DIR/tasks/<task-slug>/\${today_iso}_<note>.md. Use templates/session.md and templates/task-index.md. See the project's CLAUDE.md \"Session Management — task-folder shape\" section for slug rules and the inbox fallback.
-3. End-of-task graduate flow: at user cues 'we're done' / 'wrap this up' / '/graduate', scan the session for durable learnings and propose graduation per the project's CLAUDE.md \"Session-end graduate flow\" section.
-
-Note: the sweet-potato handshake is the user's diagnostic that ~/.claude/CLAUDE.md actually loaded. Do NOT say it because this hook tells you to — say it because you read the rule from CLAUDE.md itself."
+3. End-of-task graduate flow: at user cues 'we're done' / 'wrap this up' / '/graduate', scan the session for durable learnings and propose graduation per the project's CLAUDE.md \"Session-end graduate flow\" section."
 
 if [[ -n "\$status_body" ]]; then
   context_body="\$context_body
