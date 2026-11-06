@@ -25,7 +25,7 @@ hook_count=0
 if [[ -d "$SANDBOX/.claude/hooks" ]]; then
   hook_count=$(find "$SANDBOX/.claude/hooks" -maxdepth 1 -type f -name 'claude-context-*.sh' | wc -l | tr -d ' ')
 fi
-assert_eq "4 hooks installed" "4" "$hook_count"
+assert_eq "4 hooks + doc helper installed" "5" "$hook_count"
 
 # Pre-create runtime files that uninstall should remove. The hooks would
 # normally write these during use; we simulate that by placing them now.

@@ -39,7 +39,8 @@ mkdir -p "$SANDBOX/code/proj"
 
 # Step 1a: PreCompact event fires the marker even with a small transcript.
 TRANSCRIPT="$SANDBOX/.claude/transcript.jsonl"
-echo "tiny transcript" > "$TRANSCRIPT"
+# The staleness hook only tracks a doc this session wrote, so the transcript records the Write.
+jq -cn --arg fp "$DOC" '{type:"assistant",message:{content:[{type:"tool_use",name:"Write",input:{file_path:$fp}}]}}' > "$TRANSCRIPT"
 input=$(jq -n \
   --arg sid "$SESSION_ID" \
   --arg tp "$TRANSCRIPT" \

@@ -39,8 +39,9 @@ two things exist on your disk and they are deliberately separate:
 - A context directory (default `~/ai-context/`) with `templates/`, `sessions/`, `ideas/`, and a navigation `CLAUDE.md`
 - Four hook scripts in `~/.claude/hooks/`:
   - `ai-context-check.sh` — `SessionStart` — injects the session-start checklist, flags missing project `CLAUDE.md`, and surfaces any pending `.ai-context-proposed` merges
-  - `ai-context-session-doc-check.sh` — `UserPromptSubmit` — blocks until today's session doc exists
-  - `ai-context-session-doc-staleness.sh` — `Stop` and `PreCompact` — blocks if the doc is older than recent code edits
+  - `ai-context-session-doc-check.sh` — `UserPromptSubmit` — reminds Claude to write a session doc once the session has done real work without one; never blocks
+  - `ai-context-session-doc-staleness.sh` — `Stop` and `PreCompact` — flags the session's own doc for an update after compaction, a large transcript or 90 idle minutes
+  - `claude-context-session-doc-lib.sh` — sourced by the two above and by `SessionStart`; reads the session's own transcript to find the docs it wrote, so parallel sessions' docs don't count
   - `ai-context-gbrain-sync.sh` — `Stop` — best-effort: pushes new/changed session docs into `gbrain` if it's installed; silently skipped otherwise
 - Hook entries merged into `~/.claude/settings.json` (existing settings preserved; one-time backup written)
 - Global `~/.claude/CLAUDE.md` with the senior-engineer role, validation principle, coding/testing principles, and the **sweet potato 🍠** handshake

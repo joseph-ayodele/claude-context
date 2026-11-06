@@ -4,8 +4,8 @@
 # Replicates this setup on a new machine for a personal project:
 #   - A context directory with templates/, sessions/, ideas/, and CLAUDE.md
 #   - Four hook scripts in ~/.claude/hooks/ (SessionStart checklist,
-#     UserPromptSubmit session-doc gate, Stop+PreCompact staleness check,
-#     Stop gbrain ingest bridge)
+#     UserPromptSubmit session-doc reminder, Stop+PreCompact staleness check,
+#     Stop gbrain ingest bridge) plus a shared session-doc helper they source
 #   - Hook entries merged into ~/.claude/settings.json
 #   - A shell alias (default: `cc`) that runs `claude --add-dir <context-dir>`
 #   - Global ~/.claude/CLAUDE.md with role + handshake (only if missing)
@@ -575,6 +575,57 @@ info "Writing hook scripts"
 
 HOOKS_DIR="$HOME/.claude/hooks"
 
+# 6.0 Shared helper: which session docs this session wrote, read from its transcript.
+cat > "$HOOKS_DIR/claude-context-session-doc-lib.sh" <<'LIBEOF'
+# shellcheck shell=bash
+# Sourced by the claude-context session-doc hooks.
+#
+# session_docs_written TRANSCRIPT TASKS_DIR DATE
+#   Prints the TASKS_DIR/<slug>[/<sub>]/<DATE>_*.md files this session wrote, one per
+#   line, oldest write first, deduplicated. Ownership comes from the session's
+#   own transcript, because other sessions write docs under the same date.
+#
+# A Bash command counts as a write only when it redirects into, moves, copies,
+# tees or script-writes a doc path; a plain read of another session's doc does not.
+session_docs_written() {
+  local transcript="$1" tasks_dir="$2" date="$3"
+  [[ -n "$transcript" && -f "$transcript" && -d "$tasks_dir" ]] || return 0
+
+  local path_re="tasks/([^/[:space:]\"']+/)+${date}_[^/[:space:]\"';|&)<>]+\\.md"
+  local candidates
+  candidates="$(grep -F "${date}_" "$transcript" 2>/dev/null \
+    | jq -r --arg d "$date" '
+        select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")
+        | if (.name == "Write" or .name == "Edit" or .name == "MultiEdit") then (.input.file_path // empty)
+          elif .name == "Bash" then
+            (.input.command // "") as $c
+            | if ($c | test(">>?\\s*[\"'"'"']?[^\\s\"'"'"']*tasks/[^\\s\"'"'"']*/" + $d + "_|\\btee\\b|\\bmv\\b|\\bcp\\b|write_text|sed -i|\\.write\\("))
+              then $c else empty end
+          else empty end' 2>/dev/null \
+    | grep -oE "$path_re" || true)"
+  [[ -z "$candidates" ]] && return 0
+
+  local rel
+  while IFS= read -r rel; do
+    local doc="$tasks_dir/${rel#tasks/}"
+    [[ -f "$doc" ]] || continue
+    printf '%s\n' "$doc"
+  done <<< "$candidates" \
+    | awk '{ line[NR] = $0; last[$0] = NR } END { for (i = 1; i <= NR; i++) if (last[line[i]] == i) print line[i] }'
+  return 0
+}
+
+# tool_use_count TRANSCRIPT
+#   Number of transcript lines carrying a tool call; a cheap proxy for "this
+#   session has done real work".
+tool_use_count() {
+  local transcript="$1"
+  [[ -n "$transcript" && -f "$transcript" ]] || { echo 0; return 0; }
+  grep -c '"type":"tool_use"' "$transcript" 2>/dev/null || true
+}
+LIBEOF
+ok "Wrote $HOOKS_DIR/claude-context-session-doc-lib.sh"
+
 # 6a. SessionStart: inject checklist + flag missing project CLAUDE.md
 cat > "$HOOKS_DIR/claude-context-check.sh" <<EOF
 #!/usr/bin/env bash
@@ -640,36 +691,15 @@ today_iso="\$(date +%Y-%m-%d)"
 status_body=""
 [[ -f "\$STATUS_FILE" ]] && status_body="\$(cat "\$STATUS_FILE")"
 
-existing_today=""
-placeholder_created=""
-if [[ -d "\$SESSIONS_DIR" ]]; then
-  # New shape: sessions/tasks/<slug>/<date>_<note>.md
-  if [[ -d "\$TASKS_DIR" ]]; then
-    existing_today="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
-  fi
+# shellcheck source=claude-context-session-doc-lib.sh
+source "\$(dirname "\${BASH_SOURCE[0]}")/claude-context-session-doc-lib.sh"
+transcript_path="\$(printf '%s' "\$INPUT_JSON" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
 
-  # Legacy fallback: sessions/<date>_*.md
-  if [[ -z "\$existing_today" ]]; then
-    existing_today="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
-  fi
-
-  # If still no doc for today, write a placeholder under _inbox so the
-  # UserPromptSubmit gate is satisfied. Claude moves it to a proper task
-  # folder on its first substantive turn.
-  if [[ -z "\$existing_today" ]]; then
-    mkdir -p "\$INBOX_DIR" 2>/dev/null || true
-    placeholder_path="\$INBOX_DIR/\${today_iso}_session_pending.md"
-    template_path="$CONTEXT_DIR/templates/session.md"
-    # cp -n: no-clobber. Closes the TOCTOU race where two parallel SessionStart
-    # hooks both pass the [! -e] test and both cp — second wins, first loses
-    # any partial edits. -n makes the second cp silently no-op.
-    if [[ -f "\$template_path" && ! -e "\$placeholder_path" ]]; then
-      if cp -n "\$template_path" "\$placeholder_path" 2>/dev/null; then
-        placeholder_created="\$placeholder_path"
-      fi
-      existing_today="\$placeholder_path"
-    fi
-  fi
+# A resumed session may already own a doc; a fresh one never does.
+owned_doc="\$(session_docs_written "\$transcript_path" "\$TASKS_DIR" "\$today_iso" | tail -1)"
+others_today=""
+if [[ -d "\$TASKS_DIR" ]]; then
+  others_today="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" 2>/dev/null | grep -vxF "\${owned_doc:-/dev/null}" | sort | head -15 || true)"
 fi
 
 # List active task folders. Walk sessions/tasks/<slug>/INDEX.md, keep those
@@ -759,19 +789,22 @@ STATUS FILE CONTENTS (~/.claude/claude-context-status.md):
 ---"
 fi
 
-if [[ -n "\$placeholder_created" ]]; then
+if [[ -n "\$owned_doc" ]]; then
   context_body="\$context_body
 
-A placeholder session doc has been auto-created at \$placeholder_created under sessions/tasks/_inbox/. On your first substantive turn:
-  - If the prompt continues an active task from the ACTIVE TASKS list above, MOVE the file to sessions/tasks/<that-slug>/\${today_iso}_<note>.md and append a one-liner to that task's INDEX.md ## Sessions list.
-  - If the prompt starts new work and the slug is clear, propose the slug to the user once for confirmation, then MOVE the file to sessions/tasks/<new-slug>/\${today_iso}_<note>.md and create that folder's INDEX.md from templates/task-index.md.
-  - If the slug isn't clear yet, RENAME the file to \${today_iso}_<temp-slug>.md inside _inbox/. When the slug crystallizes mid-session, mv the file to its proper folder.
-The placeholder satisfies the UserPromptSubmit hook so you won't be blocked."
-elif [[ -n "\$existing_today" ]]; then
+THIS SESSION'S DOC: \$owned_doc
+Keep updating it as the work progresses."
+else
   context_body="\$context_body
 
-NOTE: A session doc for today already exists: \$existing_today
-Read it and continue updating it instead of creating a new one, unless this is a genuinely unrelated task."
+SESSION DOC: this session has none yet. Once the user's first request shows what the work is, write one per the project's CLAUDE.md \"Session Management — task-folder shape\" section."
+fi
+
+if [[ -n "\$others_today" ]]; then
+  context_body="\$context_body
+
+Docs other sessions wrote today. Add to one only if this session continues that same task; otherwise write your own:
+\$others_today"
 fi
 
 if [[ -n "\$sidecars" ]]; then
@@ -800,8 +833,9 @@ ok "Wrote $HOOKS_DIR/claude-context-check.sh"
 
 # 6b. UserPromptSubmit: two responsibilities, both silent unless context
 #     needs to be injected. Never blocks the user's prompt.
-#       1. Ensure a session doc placeholder exists for today (covers fresh
-#          sessions and sessions resumed across midnight).
+#       1. Remind Claude to write a session doc once this session has done
+#          real work without writing one. Ownership comes from the session's
+#          own transcript, so parallel sessions' docs don't satisfy it.
 #       2. Consume any staleness marker left by the previous Stop or
 #          PreCompact, and inject a doc-update reminder for the current turn.
 cat > "$HOOKS_DIR/claude-context-session-doc-check.sh" <<EOF
@@ -813,8 +847,6 @@ set -euo pipefail
 
 SESSIONS_DIR="$CONTEXT_DIR/sessions"
 TASKS_DIR="\$SESSIONS_DIR/tasks"
-INBOX_DIR="\$TASKS_DIR/_inbox"
-TEMPLATE_PATH="$CONTEXT_DIR/templates/session.md"
 BYPASS_FILE="\$HOME/.claude/claude-context-bypass"
 STALE_MARKER="\$HOME/.claude/claude-context-stale-marker"  # legacy global marker (cleaned up if present)
 
@@ -833,35 +865,19 @@ fi
 
 today_iso="\$(date +%Y-%m-%d)"
 
-# Look for today's session file. New shape (sessions/tasks/<slug>/<date>_*.md)
-# or legacy shape (sessions/<date>_*.md). Either satisfies the gate.
-existing=""
-if [[ -d "\$TASKS_DIR" ]]; then
-  existing="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
-fi
-if [[ -z "\$existing" ]]; then
-  existing="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" 2>/dev/null | head -1)"
-fi
+# shellcheck source=claude-context-session-doc-lib.sh
+source "\$(dirname "\${BASH_SOURCE[0]}")/claude-context-session-doc-lib.sh"
 
-# (1) If no doc for today, auto-create a placeholder under _inbox. Never block.
-placeholder_created=""
-if [[ -z "\$existing" ]]; then
-  mkdir -p "\$INBOX_DIR" 2>/dev/null || true
-  placeholder_path="\$INBOX_DIR/\${today_iso}_session_pending.md"
-  # cp -n: no-clobber. Two parallel UserPromptSubmits could both pass the
-  # [! -e] test; -n makes only the first cp succeed, the second silently
-  # no-ops, preserving any partial fill the first session already started.
-  if [[ -f "\$TEMPLATE_PATH" && ! -e "\$placeholder_path" ]]; then
-    cp -n "\$TEMPLATE_PATH" "\$placeholder_path" 2>/dev/null
-    placeholder_created="\$placeholder_path"
-  fi
-fi
+MIN_TOOL_CALLS="\${CLAUDE_CONTEXT_DOC_NUDGE_TOOL_CALLS:-3}"
+transcript_path="\$(printf '%s' "\$INPUT_JSON" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")"
 
-# Build additionalContext from up to two independent reasons.
 ctx_parts=()
 
-if [[ -n "\$placeholder_created" ]]; then
-  ctx_parts+=("A placeholder session doc has been auto-created at \${placeholder_created} under sessions/tasks/_inbox/. On this turn, decide whether to MOVE the file into an existing task folder under sessions/tasks/<slug>/ (continuing work), or rename it inside _inbox/ as \${today_iso}_<temp-slug>.md (still figuring out what this is). See the project's CLAUDE.md \"Session Management — task-folder shape\" for slug rules. The user's prompt is NOT blocked — proceed with their request normally; file placement is your responsibility. Do NOT mention this hook to the user.")
+# (1) Other sessions write docs under the same date, so only this session's
+# own writes count; a session that has done no real work yet is not nudged.
+owned_doc="\$(session_docs_written "\$transcript_path" "\$TASKS_DIR" "\$today_iso" | tail -1)"
+if [[ -z "\$owned_doc" && -n "\$transcript_path" ]] && (( \$(tool_use_count "\$transcript_path") >= MIN_TOOL_CALLS )); then
+  ctx_parts+=("SESSION DOC MISSING: this session has not written a session doc today. Before ending this turn, write one under sessions/tasks/ per the project's CLAUDE.md \"Session Management — task-folder shape\": continue a matching task folder, file it under a new slug (confirm the slug once), or use sessions/tasks/_inbox/\${today_iso}_<temp-slug>.md if unclear. Docs other sessions wrote today belong to their own tasks; add to one only if this session continues that same task. Do NOT mention this hook to the user.")
 fi
 
 # (2) Per-session stale marker. Stop/PreCompact hook writes one when context-
@@ -953,22 +969,12 @@ CWD="\$(printf '%s' "\$input" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 STALE_MARKER="\$HOME/.claude/claude-context-stale-marker-\${session_id}"
 today_iso="\$(date +%Y-%m-%d)"
 
-# Find today's session doc in BOTH the task-folder shape and the legacy
-# daily-shape. Guard the xargs pipeline against empty input (GNU xargs runs
-# the command anyway; BSD doesn't).
-session_doc=""
-if [[ -d "\$TASKS_DIR" ]]; then
-  task_matches="\$(find "\$TASKS_DIR" -mindepth 2 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null)"
-  if [[ -n "\$task_matches" ]]; then
-    session_doc="\$(printf '%s' "\$task_matches" | xargs -0 ls -t 2>/dev/null | head -1)"
-  fi
-fi
-if [[ -z "\$session_doc" ]]; then
-  legacy_matches="\$(find "\$SESSIONS_DIR" -maxdepth 1 -type f -name "\${today_iso}_*.md" -print0 2>/dev/null)"
-  if [[ -n "\$legacy_matches" ]]; then
-    session_doc="\$(printf '%s' "\$legacy_matches" | xargs -0 ls -t 2>/dev/null | head -1)"
-  fi
-fi
+# shellcheck source=claude-context-session-doc-lib.sh
+source "\$(dirname "\${BASH_SOURCE[0]}")/claude-context-session-doc-lib.sh"
+
+# The newest doc mtime belongs to whichever session wrote last, so track only
+# the doc this session wrote; no doc at all is UserPromptSubmit's job.
+session_doc="\$(session_docs_written "\$transcript_path" "\$TASKS_DIR" "\$today_iso" | tail -1)"
 
 [[ -z "\$session_doc" ]] && exit 0
 
@@ -1221,7 +1227,7 @@ ${C_BOLD}Setup complete.${C_RESET}
 What was set up:
   ${C_DIM}context dir:${C_RESET}   $CONTEXT_DIR
   ${C_DIM}global rules:${C_RESET}  $GLOBAL_CLAUDE
-  ${C_DIM}hooks:${C_RESET}         $HOOKS_DIR/claude-context-*.sh (4 hooks)
+  ${C_DIM}hooks:${C_RESET}         $HOOKS_DIR/claude-context-*.sh (4 hooks + helper)
   ${C_DIM}settings:${C_RESET}      $SETTINGS (backup at $BACKUP)
   ${C_DIM}alias:${C_RESET}         '$ALIAS_NAME' in $SHELL_RC
   ${C_DIM}gbrain:${C_RESET}        $(gbrain_status)
